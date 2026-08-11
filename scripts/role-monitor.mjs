@@ -1,15 +1,32 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.SUPABASE_URL
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+// Accept either a normal Supabase project URL or a URL accidentally copied
+// with /rest/v1 appended. supabase-js expects the project URL as its base.
+const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 
-if (!supabaseUrl || !supabaseKey) {
+if (!rawSupabaseUrl || !supabaseKey) {
   console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY GitHub Actions secrets.')
+  process.exit(1)
+}
+
+let supabaseUrl
+try {
+  const parsed = new URL(rawSupabaseUrl)
+  // If the secret was entered as https://<project>.supabase.co/rest/v1,
+  // remove the REST path because supabase-js adds /rest/v1 itself.
+  parsed.pathname = ''
+  parsed.search = ''
+  parsed.hash = ''
+  supabaseUrl = parsed.toString().replace(/\/$/, '')
+} catch {
+  console.error(`Invalid SUPABASE_URL secret: ${rawSupabaseUrl}`)
   process.exit(1)
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: { persistSession: false, autoRefreshToken: false },
+  realtime: { enabled: false },
 })
 
 const today = new Date().toISOString().slice(0, 10)
@@ -46,29 +63,25 @@ async function checkUrl(url) {
       })
     }
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      finalUrl: response.url,
-    }
+    return { ok: response.ok, status: response.status, finalUrl: response.url }
   } catch (error) {
-    return {
-      ok: false,
-      status: null,
-      finalUrl: url,
-      error: error?.message ?? 'Unknown error',
-    }
+    return { ok: false, status: null, finalUrl: url, error: error?.message ?? 'Unknown error' }
   } finally {
     clearTimeout(timer)
   }
 }
 
 async function main() {
+  console.log(`Using Supabase project: ${new URL(supabaseUrl).hostname}`)
+
   const { data: placements, error } = await supabase
     .from('placements')
     .select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified')
 
-  if (error) throw error
+  if (error) {
+    console.error('Supabase query failed:', error)
+    throw error
+  }
 
   console.log(`Checking ${placements?.length ?? 0} tracked opportunities...`)
 
@@ -92,18 +105,13 @@ async function main() {
     }
 
     checked++
-
     const statusText = result?.ok
       ? `URL reachable (${result.status})`
       : `URL check failed${result?.status ? ` (${result.status})` : ''}`
 
-    const sourceVerified = result?.ok
-      ? `${statusText}; automatically checked ${today}`
-      : `${statusText}; automatically checked ${today}`
-
     const updates = {
       source_date_checked: today,
-      source_verified: sourceVerified,
+      source_verified: `${statusText}; automatically checked ${today}`,
       updated_at: new Date().toISOString(),
     }
 
