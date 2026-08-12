@@ -1,0 +1,1 @@
+Country classification now uses country, city and company together. Rocket Lab New Zealand locations are explicitly classified as Oceania, while Rocket Lab US locations are America. Filtering passes all three placement fields to the classifier.

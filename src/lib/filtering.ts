@@ -37,7 +37,7 @@ export function filterPlacements(placements: Placement[], filters: { priority:st
   return placements.filter(p => {
     if (filters.priority !== 'all' && p.overall_priority !== filters.priority) return false
     if (filters.sector !== 'all' && sectorGroup(p.sector, p.company) !== filters.sector) return false
-    if (filters.country !== 'all' && countryGroup(p.country) !== filters.country) return false
+    if (filters.country !== 'all' && countryGroup(p.country, p.city, p.company) !== filters.country) return false
     if (filters.engineeringArea !== 'all' && p.engineering_area !== filters.engineeringArea) return false
     if (filters.status !== 'all' && normaliseApplicationStatus(p.application_status) !== filters.status) return false
     const stage = p.app_status ?? 'Not Applied'
