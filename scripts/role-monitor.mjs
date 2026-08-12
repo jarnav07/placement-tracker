@@ -13,11 +13,13 @@ if (!rawSupabaseUrl || !supabaseKey) {
 let supabaseUrl
 try {
   const parsed = new URL(rawSupabaseUrl)
+
   // If the secret was entered as https://<project>.supabase.co/rest/v1,
   // remove the REST path because supabase-js adds /rest/v1 itself.
   parsed.pathname = ''
   parsed.search = ''
   parsed.hash = ''
+
   supabaseUrl = parsed.toString().replace(/\/$/, '')
 } catch {
   console.error(`Invalid SUPABASE_URL secret: ${rawSupabaseUrl}`)
@@ -34,6 +36,7 @@ const timeoutMs = 15000
 
 function normaliseUrl(value) {
   if (!value) return null
+
   try {
     return new URL(value).toString()
   } catch {
@@ -85,15 +88,30 @@ async function checkUrl(url) {
   }
 }
 
-/**
- * Keep the database/application badges consistent.
- *
- * When a role that was being watched or prepared for becomes genuinely
- * actionable, move it to APPLY_NOW and mark the application as Open.
+/*
+ * Keep application availability and priority consistent.
  *
  * IMPORTANT:
- * This does NOT mean the user has applied.
- * app_status/application tracking remains untouched.
+ * - application_status describes whether the COMPANY is accepting applications.
+ * - app_status describes YOUR personal application progress.
+ *
+ * Therefore this function NEVER changes app_status.
+ *
+ * Priority transitions:
+ *
+ * HIGH_PRIORITY_WATCH
+ *        ↓ application opens
+ * APPLY_IMMEDIATELY
+ *
+ * APPLY_WHEN_OPENING
+ *        ↓ application opens
+ * APPLY_IMMEDIATELY
+ *
+ * APPLY_IMMEDIATELY
+ *        ↓ application remains open
+ * APPLY_IMMEDIATELY
+ *
+ * Other priorities are left unchanged.
  */
 function synchroniseOpenRoleState(placement, applicationIsOpen) {
   if (!applicationIsOpen) {
@@ -105,19 +123,15 @@ function synchroniseOpenRoleState(placement, applicationIsOpen) {
     .toUpperCase()
     .replace(/\s+/g, '_')
 
-  const watchOrPreparePriorities = new Set([
-    'HIGH_PRIORITY_WATCH',
-    'PREPARE_TO_APPLY',
-    'HIGH',
-    'PREPARE',
-  ])
-
   const updates = {
-    application_status: 'Open',
+    application_status: 'Open Now',
   }
 
-  if (watchOrPreparePriorities.has(priority)) {
-    updates.overall_priority = 'APPLY_NOW'
+  if (
+    priority === 'HIGH_PRIORITY_WATCH' ||
+    priority === 'APPLY_WHEN_OPENING'
+  ) {
+    updates.overall_priority = 'APPLY_IMMEDIATELY'
   }
 
   return updates
@@ -153,6 +167,12 @@ async function main() {
   let priorityUpdated = 0
 
   for (const placement of placements ?? []) {
+    /*
+     * Only an actual application_link can make a role "Open Now".
+     *
+     * careers_page and source_url are checked for monitoring purposes,
+     * but their being reachable does NOT mean the application is open.
+     */
     const applicationLink = normaliseUrl(placement.application_link)
 
     const candidates = [
@@ -163,7 +183,9 @@ async function main() {
       .map(normaliseUrl)
       .filter(Boolean)
 
-    if (!candidates.length) continue
+    if (!candidates.length) {
+      continue
+    }
 
     let result = null
     let checkedUrl = null
@@ -172,7 +194,9 @@ async function main() {
       result = await checkUrl(url)
       checkedUrl = url
 
-      if (result.ok) break
+      if (result.ok) {
+        break
+      }
     }
 
     checked++
@@ -188,11 +212,13 @@ async function main() {
     }
 
     /*
-     * Only treat the role as open when the actual application_link exists
-     * and is reachable.
+     * A role is considered open by this monitor only when:
      *
-     * A careers page or company homepage being reachable does NOT make the
-     * role "Open Now".
+     * 1. It has an actual application_link
+     * 2. That application_link is the URL we successfully checked
+     * 3. The URL is reachable
+     *
+     * A careers page being reachable is NOT enough.
      */
     const applicationIsOpen = Boolean(
       applicationLink &&
@@ -213,8 +239,8 @@ async function main() {
       opened++
 
       if (
-        stateUpdates.overall_priority === 'APPLY_NOW' &&
-        previousPriority !== 'APPLY_NOW'
+        stateUpdates.overall_priority === 'APPLY_IMMEDIATELY' &&
+        previousPriority !== 'APPLY_IMMEDIATELY'
       ) {
         priorityUpdated++
       }
