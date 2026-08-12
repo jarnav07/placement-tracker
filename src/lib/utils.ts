@@ -1,9 +1,9 @@
 import type { Placement, OverallPriority } from './supabase'
 
 export const PRIORITY_LABELS: Record<OverallPriority, string> = {
-  APPLY_IMMEDIATELY: 'Apply Immediately',
-  APPLY_WHEN_OPENING: 'Apply When Opening',
-  HIGH_PRIORITY_WATCH: 'High Priority Watch',
+  APPLY_IMMEDIATELY: 'Apply Now',
+  APPLY_WHEN_OPENING: 'Prepare to Apply',
+  HIGH_PRIORITY_WATCH: 'Watch Closely',
   GOOD_BACKUP: 'Good Backup',
   LOW_PRIORITY: 'Low Priority',
 }
