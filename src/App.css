@@ -87,6 +87,10 @@ body {
 .stat-chip.soon .stat-num { color: #f97316; }
 .stat-chip.expected .stat-num { color: #eab308; }
 
+/* Clarify that the orange header stat is an application-status count, not the orange priority tier. */
+.stat-chip.soon .stat-label { font-size: 0; }
+.stat-chip.soon .stat-label::after { content: 'Opens Soon'; font-size: 0.7rem; }
+
 /* Main */
 .app-main { flex: 1; max-width: 1400px; width: 100%; margin: 0 auto; padding: 20px 24px; }
 
@@ -103,6 +107,12 @@ body {
 .summary-tab.active { color: var(--text); border-color: var(--accent); background: rgba(56,189,248,0.08); }
 .tab-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .tab-count { font-weight: 700; color: var(--text); }
+
+/* The orange traffic-light tier is a priority recommendation, not the application status "Opening Soon". */
+.summary-tab:nth-child(3) .tab-label { font-size: 0; }
+.summary-tab:nth-child(3) .tab-label::after { content: 'Prepare to Apply'; font-size: 0.8rem; }
+.summary-tab:nth-child(4) .tab-label { font-size: 0; }
+.summary-tab:nth-child(4) .tab-label::after { content: 'Watch Closely'; font-size: 0.8rem; }
 
 /* Controls */
 .controls { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
