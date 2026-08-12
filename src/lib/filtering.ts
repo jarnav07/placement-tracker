@@ -1,23 +1,9 @@
 import type { Placement } from './supabase'
+import { countryGroup, type CountryGroup } from './countryGroups'
 
-export type CountryGroup = 'UK' | 'Europe' | 'Asia' | 'Oceania'
+export type { CountryGroup }
 export type SectorGroup = 'Aerospace & Space' | 'Defence' | 'Motorsport' | 'Engineering & Technology' | 'Research & Advanced Tech'
 export type SortOption = 'deadline' | 'cv_fit' | 'relevance' | 'company'
-
-const EUROPE_COUNTRIES = new Set(['Austria','Belgium','Bulgaria','Croatia','Cyprus','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Iceland','Ireland','Italy','Latvia','Liechtenstein','Lithuania','Luxembourg','Malta','Monaco','Montenegro','Netherlands','North Macedonia','Norway','Poland','Portugal','Romania','San Marino','Serbia','Slovakia','Slovenia','Spain','Sweden','Switzerland','Ukraine','Vatican City'])
-const ASIA_COUNTRIES = new Set(['Afghanistan','Armenia','Azerbaijan','Bahrain','Bangladesh','Bhutan','Brunei','Cambodia','China','Cyprus','Georgia','India','Indonesia','Iran','Iraq','Israel','Japan','Jordan','Kazakhstan','Kuwait','Kyrgyzstan','Laos','Lebanon','Malaysia','Maldives','Mongolia','Myanmar','Nepal','North Korea','Oman','Pakistan','Palestine','Philippines','Qatar','Saudi Arabia','Singapore','South Korea','Korea','Sri Lanka','Taiwan','Tajikistan','Thailand','Timor-Leste','Turkey','Turkmenistan','United Arab Emirates','Uzbekistan','Vietnam','Yemen','Hong Kong','Macau'])
-const OCEANIA_COUNTRIES = new Set(['Australia','New Zealand','Papua New Guinea','Fiji','Samoa','Tonga','Vanuatu','Solomon Islands','Micronesia','Palau','Marshall Islands','Kiribati','Nauru','Tuvalu'])
-
-export function countryGroup(country: string | null): CountryGroup {
-  const c = (country ?? '').trim()
-  if (/^(UK|United Kingdom|England|Scotland|Wales|Northern Ireland|Great Britain)$/i.test(c)) return 'UK'
-  if (EUROPE_COUNTRIES.has(c)) return 'Europe'
-  if (ASIA_COUNTRIES.has(c)) return 'Asia'
-  if (OCEANIA_COUNTRIES.has(c)) return 'Oceania'
-  // Every company must belong to one of the four UI groups. Unknown locations
-  // are treated as Europe as the closest default for this placement tracker.
-  return 'Europe'
-}
 
 export function sectorGroup(sector: string | null, company = ''): SectorGroup {
   const s = `${sector ?? ''} ${company}`.toLowerCase()

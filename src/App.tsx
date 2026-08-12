@@ -11,7 +11,7 @@ type FilterPriority = 'all' | OverallPriority
 type View = 'opportunities' | 'applications'
 const APP_STAGES: AppStatus[] = ['Saved','Applied','Assessment','Interview','Final Interview','Offer','Accepted','Rejected','Withdrawn']
 const SECTORS: SectorGroup[] = ['Aerospace & Space','Defence','Motorsport','Engineering & Technology','Research & Advanced Tech']
-const COUNTRIES: CountryGroup[] = ['UK','Europe','Asia','Oceania']
+const COUNTRIES: CountryGroup[] = ['UK','Europe','Asia','Oceania','America']
 
 export default function App() {
   const [placements, setPlacements] = useState<Placement[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null)
