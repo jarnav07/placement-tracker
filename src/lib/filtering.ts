@@ -1,18 +1,22 @@
 import type { Placement } from './supabase'
 
-export type CountryGroup = 'UK' | 'EU' | 'Asia' | 'Other'
+export type CountryGroup = 'UK' | 'Europe' | 'Asia' | 'Oceania'
 export type SectorGroup = 'Aerospace & Space' | 'Defence' | 'Motorsport' | 'Engineering & Technology' | 'Research & Advanced Tech'
 export type SortOption = 'deadline' | 'cv_fit' | 'relevance' | 'company'
 
-const EU_COUNTRIES = new Set(['Austria','Belgium','Bulgaria','Croatia','Cyprus','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Ireland','Italy','Latvia','Lithuania','Luxembourg','Malta','Netherlands','Poland','Portugal','Romania','Slovakia','Slovenia','Spain','Sweden'])
-const ASIA_COUNTRIES = new Set(['Japan','South Korea','Korea','Singapore','Taiwan','Israel','Malaysia','Thailand','Indonesia','Vietnam','Hong Kong'])
+const EUROPE_COUNTRIES = new Set(['Austria','Belgium','Bulgaria','Croatia','Cyprus','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Iceland','Ireland','Italy','Latvia','Liechtenstein','Lithuania','Luxembourg','Malta','Monaco','Montenegro','Netherlands','North Macedonia','Norway','Poland','Portugal','Romania','San Marino','Serbia','Slovakia','Slovenia','Spain','Sweden','Switzerland','Ukraine','Vatican City'])
+const ASIA_COUNTRIES = new Set(['Japan','South Korea','Korea','Singapore','Taiwan','Israel','Malaysia','Thailand','Indonesia','Vietnam','Hong Kong','India','China','Philippines','Pakistan','Bangladesh','United Arab Emirates','Saudi Arabia','Qatar','Turkey'])
+const OCEANIA_COUNTRIES = new Set(['Australia','New Zealand','Fiji','Papua New Guinea','Samoa'])
 
 export function countryGroup(country: string | null): CountryGroup {
   const c = (country ?? '').trim()
   if (/^(UK|United Kingdom|England|Scotland|Wales|Northern Ireland)$/i.test(c)) return 'UK'
-  if (EU_COUNTRIES.has(c)) return 'EU'
+  if (OCEANIA_COUNTRIES.has(c)) return 'Oceania'
+  if (EUROPE_COUNTRIES.has(c)) return 'Europe'
   if (ASIA_COUNTRIES.has(c)) return 'Asia'
-  return 'Other'
+  // Every company must belong to one of the three international regions.
+  // Unknown countries are assigned to Europe as the fallback so there is no "Other" bucket.
+  return 'Europe'
 }
 
 export function sectorGroup(sector: string | null, company = ''): SectorGroup {
