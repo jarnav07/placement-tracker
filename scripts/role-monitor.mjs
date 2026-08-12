@@ -47,28 +47,80 @@ async function checkUrl(url) {
 
   try {
     let response
+
     try {
       response = await fetch(url, {
         method: 'HEAD',
         redirect: 'follow',
         signal: controller.signal,
-        headers: { 'User-Agent': 'placement-tracker-role-monitor/1.0' },
+        headers: {
+          'User-Agent': 'placement-tracker-role-monitor/1.0',
+        },
       })
     } catch {
       response = await fetch(url, {
         method: 'GET',
         redirect: 'follow',
         signal: controller.signal,
-        headers: { 'User-Agent': 'placement-tracker-role-monitor/1.0' },
+        headers: {
+          'User-Agent': 'placement-tracker-role-monitor/1.0',
+        },
       })
     }
 
-    return { ok: response.ok, status: response.status, finalUrl: response.url }
+    return {
+      ok: response.ok,
+      status: response.status,
+      finalUrl: response.url,
+    }
   } catch (error) {
-    return { ok: false, status: null, finalUrl: url, error: error?.message ?? 'Unknown error' }
+    return {
+      ok: false,
+      status: null,
+      finalUrl: url,
+      error: error?.message ?? 'Unknown error',
+    }
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Keep the database/application badges consistent.
+ *
+ * When a role that was being watched or prepared for becomes genuinely
+ * actionable, move it to APPLY_NOW and mark the application as Open.
+ *
+ * IMPORTANT:
+ * This does NOT mean the user has applied.
+ * app_status/application tracking remains untouched.
+ */
+function synchroniseOpenRoleState(placement, applicationIsOpen) {
+  if (!applicationIsOpen) {
+    return {}
+  }
+
+  const priority = String(placement.overall_priority ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '_')
+
+  const watchOrPreparePriorities = new Set([
+    'HIGH_PRIORITY_WATCH',
+    'PREPARE_TO_APPLY',
+    'HIGH',
+    'PREPARE',
+  ])
+
+  const updates = {
+    application_status: 'Open',
+  }
+
+  if (watchOrPreparePriorities.has(priority)) {
+    updates.overall_priority = 'APPLY_NOW'
+  }
+
+  return updates
 }
 
 async function main() {
@@ -76,7 +128,17 @@ async function main() {
 
   const { data: placements, error } = await supabase
     .from('placements')
-    .select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified')
+    .select(`
+      id,
+      company,
+      specific_role,
+      application_status,
+      application_link,
+      careers_page,
+      source_url,
+      source_verified,
+      overall_priority
+    `)
 
   if (error) {
     console.error('Supabase query failed:', error)
@@ -87,9 +149,17 @@ async function main() {
 
   let checked = 0
   let broken = 0
+  let opened = 0
+  let priorityUpdated = 0
 
   for (const placement of placements ?? []) {
-    const candidates = [placement.application_link, placement.careers_page, placement.source_url]
+    const applicationLink = normaliseUrl(placement.application_link)
+
+    const candidates = [
+      placement.application_link,
+      placement.careers_page,
+      placement.source_url,
+    ]
       .map(normaliseUrl)
       .filter(Boolean)
 
@@ -101,10 +171,12 @@ async function main() {
     for (const url of candidates) {
       result = await checkUrl(url)
       checkedUrl = url
+
       if (result.ok) break
     }
 
     checked++
+
     const statusText = result?.ok
       ? `URL reachable (${result.status})`
       : `URL check failed${result?.status ? ` (${result.status})` : ''}`
@@ -115,9 +187,50 @@ async function main() {
       updated_at: new Date().toISOString(),
     }
 
+    /*
+     * Only treat the role as open when the actual application_link exists
+     * and is reachable.
+     *
+     * A careers page or company homepage being reachable does NOT make the
+     * role "Open Now".
+     */
+    const applicationIsOpen = Boolean(
+      applicationLink &&
+      result?.ok &&
+      normaliseUrl(checkedUrl) === applicationLink
+    )
+
+    if (applicationIsOpen) {
+      const previousPriority = placement.overall_priority
+
+      const stateUpdates = synchroniseOpenRoleState(
+        placement,
+        applicationIsOpen
+      )
+
+      Object.assign(updates, stateUpdates)
+
+      opened++
+
+      if (
+        stateUpdates.overall_priority === 'APPLY_NOW' &&
+        previousPriority !== 'APPLY_NOW'
+      ) {
+        priorityUpdated++
+      }
+
+      console.log(
+        `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+        `APPLICATION OPEN → ${stateUpdates.overall_priority ?? previousPriority}`
+      )
+    }
+
     if (!result?.ok) {
       broken++
-      updates.notes = `Automated monitor: tracked URL could not be reached on ${today}. ${result?.error ?? ''}`.trim()
+
+      updates.notes =
+        `Automated monitor: tracked URL could not be reached on ${today}. ` +
+        `${result?.error ?? ''}`.trim()
     }
 
     const { error: updateError } = await supabase
@@ -126,13 +239,25 @@ async function main() {
       .eq('id', placement.id)
 
     if (updateError) {
-      console.error(`Failed updating ${placement.company} — ${placement.specific_role}:`, updateError.message)
+      console.error(
+        `Failed updating ${placement.company} — ${placement.specific_role}:`,
+        updateError.message
+      )
     } else {
-      console.log(`${placement.company} — ${placement.specific_role ?? 'role'}: ${statusText} (${checkedUrl})`)
+      console.log(
+        `${placement.company} — ` +
+        `${placement.specific_role ?? 'role'}: ` +
+        `${statusText} (${checkedUrl})`
+      )
     }
   }
 
-  console.log(`Monitor complete: ${checked} checked, ${broken} unreachable.`)
+  console.log(
+    `Monitor complete: ${checked} checked, ` +
+    `${broken} unreachable, ` +
+    `${opened} applications open, ` +
+    `${priorityUpdated} priority updates.`
+  )
 }
 
 main().catch((error) => {
