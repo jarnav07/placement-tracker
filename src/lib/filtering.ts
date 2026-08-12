@@ -1,0 +1,86 @@
+import type { Placement } from './supabase'
+
+export type CountryGroup = 'UK' | 'Europe' | 'Asia' | 'Oceania' | 'America'
+export type SectorGroup = 'Aerospace & Space' | 'Defence' | 'Motorsport' | 'Engineering & Technology' | 'Research & Advanced Tech'
+export type SortOption = 'deadline' | 'cv_fit' | 'relevance' | 'company'
+
+const EUROPE = new Set(['Albania','Andorra','Austria','Belarus','Belgium','Bosnia and Herzegovina','Bulgaria','Croatia','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Iceland','Ireland','Italy','Kosovo','Latvia','Liechtenstein','Lithuania','Luxembourg','Malta','Moldova','Monaco','Montenegro','Netherlands','North Macedonia','Norway','Poland','Portugal','Romania','San Marino','Serbia','Slovakia','Slovenia','Spain','Sweden','Switzerland','Ukraine','Vatican City'])
+const ASIA = new Set(['Afghanistan','Armenia','Azerbaijan','Bahrain','Bangladesh','Bhutan','Brunei','Cambodia','China','Georgia','India','Indonesia','Iran','Iraq','Israel','Japan','Jordan','Kazakhstan','Kuwait','Kyrgyzstan','Laos','Lebanon','Malaysia','Maldives','Mongolia','Myanmar','Nepal','North Korea','Oman','Pakistan','Palestine','Philippines','Qatar','Saudi Arabia','Singapore','South Korea','Sri Lanka','Taiwan','Tajikistan','Thailand','Timor-Leste','Turkey','Turkmenistan','United Arab Emirates','Uzbekistan','Vietnam','Yemen','Hong Kong','Macau'])
+const OCEANIA = new Set(['Australia','New Zealand','Papua New Guinea','Fiji','Samoa','Tonga','Vanuatu','Solomon Islands','Micronesia','Palau','Marshall Islands','Kiribati','Nauru','Tuvalu'])
+const AMERICA = new Set(['Canada','United States','USA','United States of America','Mexico','Brazil','Argentina','Chile','Colombia','Peru','Uruguay','Paraguay','Bolivia','Ecuador','Venezuela','Guyana','Suriname','French Guiana','Panama','Costa Rica','Nicaragua','Honduras','El Salvador','Guatemala','Belize','Cuba','Jamaica','Haiti','Dominican Republic','Bahamas','Barbados','Trinidad and Tobago','Puerto Rico'])
+
+const normalise = (value: string | null) => (value ?? '').trim().toLowerCase()
+
+export function countryGroup(country: string | null, city: string | null = null, company: string | null = null): CountryGroup {
+  const c = normalise(country)
+  const cityText = normalise(city)
+  const companyText = normalise(company)
+  const combined = `${c} ${cityText} ${companyText}`
+
+  if (/\b(uk|united kingdom|great britain|britain|england|scotland|wales|northern ireland)\b/.test(combined)) return 'UK'
+  // Explicit Rocket Lab location handling prevents NZ roles being treated as Europe.
+  if (/rocket lab/.test(companyText) && /\b(new zealand|nz|auckland|christchurch|mahia|whangarei)\b/.test(combined)) return 'Oceania'
+  if (/\b(australia|new zealand|papua new guinea|fiji|samoa|tonga|vanuatu|solomon islands|micronesia|palau|marshall islands|kiribati|nauru|tuvalu)\b/.test(combined)) return 'Oceania'
+  if (AMERICA.has(country ?? '') || /\b(canada|usa|united states|united states of america|mexico|brazil|argentina|chile|colombia|peru|uruguay|paraguay|bolivia|ecuador|venezuela|guyana|suriname|panama|costa rica|nicaragua|honduras|el salvador|guatemala|belize|cuba|jamaica|haiti|dominican republic|bahamas|barbados|trinidad and tobago|puerto rico)\b/.test(combined)) return 'America'
+  if (EUROPE.has(country ?? '') || /\b(albania|andorra|austria|belarus|belgium|bosnia|bulgaria|croatia|czech|denmark|estonia|finland|france|germany|greece|hungary|iceland|ireland|italy|kosovo|latvia|liechtenstein|lithuania|luxembourg|malta|moldova|monaco|montenegro|netherlands|norway|poland|portugal|romania|serbia|slovakia|slovenia|spain|sweden|switzerland|ukraine)\b/.test(combined)) return 'Europe'
+  if (ASIA.has(country ?? '') || /\b(afghanistan|armenia|azerbaijan|bahrain|bangladesh|bhutan|brunei|cambodia|china|georgia|india|indonesia|iran|iraq|israel|japan|jordan|kazakhstan|kuwait|kyrgyzstan|laos|lebanon|malaysia|maldives|mongolia|myanmar|nepal|north korea|oman|pakistan|palestine|philippines|qatar|saudi arabia|singapore|south korea|sri lanka|taiwan|tajikistan|thailand|timor-leste|turkey|turkmenistan|uae|united arab emirates|uzbekistan|vietnam|yemen|hong kong|macau)\b/.test(combined)) return 'Asia'
+  // Keep the UI exhaustive. Unknown values should be investigated in the database;
+  // Europe is only the final fallback and does not affect any known country above.
+  return 'Europe'
+}
+
+export function sectorGroup(sector: string | null, company = ''): SectorGroup {
+  const s = `${sector ?? ''} ${company}`.toLowerCase()
+  if (/motorsport|formula|f1|racing|race car/.test(s)) return 'Motorsport'
+  if (/defence|defense|military|security/.test(s)) return 'Defence'
+  if (/research|university|laboratory|advanced research|r&d/.test(s)) return 'Research & Advanced Tech'
+  if (/space|rocket|launch|aerospace|aviation|aircraft|satellite|propulsion/.test(s)) return 'Aerospace & Space'
+  return 'Engineering & Technology'
+}
+
+export function normaliseApplicationStatus(status: string | null): string {
+  const s = (status ?? '').trim().toLowerCase()
+  if (s === 'open' || s === 'open now' || s.includes('currently open')) return 'Open Now'
+  if (s === 'opening soon' || s.includes('opens soon')) return 'Opening Soon'
+  if (s === 'expected') return 'Expected'
+  if (s.includes('not yet published') || s.includes('not published')) return 'Not Yet Published'
+  if (s === 'closed' || s.includes('closed')) return 'Closed'
+  return status?.trim() || 'Not Yet Published'
+}
+
+export function dateFromText(value: string | null): number | null {
+  if (!value) return null
+  const direct = Date.parse(value)
+  if (!Number.isNaN(direct)) return direct
+  const match = value.match(/(20\d{2})[-/](\d{1,2})[-/](\d{1,2})/)
+  return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : null
+}
+
+export function filterPlacements(placements: Placement[], filters: { priority:string; sector:string; country:string; engineeringArea:string; status:string; stage:string; search:string; applicationsOnly:boolean }): Placement[] {
+  const q = filters.search.trim().toLowerCase()
+  return placements.filter(p => {
+    if (filters.priority !== 'all' && p.overall_priority !== filters.priority) return false
+    if (filters.sector !== 'all' && sectorGroup(p.sector, p.company) !== filters.sector) return false
+    if (filters.country !== 'all' && countryGroup(p.country, p.city, p.company) !== filters.country) return false
+    if (filters.engineeringArea !== 'all' && p.engineering_area !== filters.engineeringArea) return false
+    if (filters.status !== 'all' && normaliseApplicationStatus(p.application_status) !== filters.status) return false
+    const stage = p.app_status ?? 'Not Applied'
+    if (filters.applicationsOnly && stage === 'Not Applied') return false
+    if (filters.stage !== 'all' && stage !== filters.stage) return false
+    if (q) {
+      const haystack = [p.company,p.specific_role,p.sector,p.city,p.country,p.engineering_area,p.department,p.placement_type,p.placement_duration,p.degree_requirements,p.required_technical_skills,p.why_it_fits,p.notes,p.cv_version,p.referral_contact].filter(Boolean).join(' ').toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
+    return true
+  })
+}
+
+export function sortFilteredPlacements(placements: Placement[], sort: SortOption): Placement[] {
+  const priorityOrder: Record<string, number> = { APPLY_IMMEDIATELY:0, APPLY_WHEN_OPENING:1, HIGH_PRIORITY_WATCH:2, GOOD_BACKUP:3, LOW_PRIORITY:4 }
+  return [...placements].sort((a,b) => {
+    if (sort === 'company') return a.company.localeCompare(b.company)
+    if (sort === 'deadline') { const ad=dateFromText(a.exact_deadline), bd=dateFromText(b.exact_deadline); if(ad===null&&bd===null)return 0; if(ad===null)return 1; if(bd===null)return -1; return ad-bd }
+    if (sort === 'cv_fit') return Number(b.cv_fit ?? 0)-Number(a.cv_fit ?? 0) || (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99)
+    return (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99) || Number(b.cv_fit ?? 0)-Number(a.cv_fit ?? 0)
+  })
+}
