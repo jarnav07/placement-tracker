@@ -1,16 +1,29 @@
 export type CountryGroup = 'UK' | 'Europe' | 'Asia' | 'Oceania' | 'America'
 
-const EUROPE = new Set(['Albania','Andorra','Austria','Belarus','Belgium','Bosnia and Herzegovina','Bulgaria','Croatia','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Iceland','Ireland','Italy','Kosovo','Latvia','Liechtenstein','Lithuania','Luxembourg','Malta','Moldova','Monaco','Montenegro','Netherlands','North Macedonia','Norway','Poland','Portugal','Romania','San Marino','Serbia','Slovakia','Slovenia','Spain','Sweden','Switzerland','Ukraine','Vatican City'])
-const ASIA = new Set(['Afghanistan','Armenia','Azerbaijan','Bahrain','Bangladesh','Bhutan','Brunei','Cambodia','China','Cyprus','Georgia','India','Indonesia','Iran','Iraq','Israel','Japan','Jordan','Kazakhstan','Kuwait','Kyrgyzstan','Laos','Lebanon','Malaysia','Maldives','Mongolia','Myanmar','Nepal','North Korea','Oman','Pakistan','Palestine','Philippines','Qatar','Saudi Arabia','Singapore','South Korea','South Korea (Republic of Korea)','Sri Lanka','Taiwan','Tajikistan','Thailand','Timor-Leste','Turkey','Turkmenistan','United Arab Emirates','Uzbekistan','Vietnam','Yemen','Hong Kong','Macau'])
-const OCEANIA = new Set(['Australia','New Zealand','Papua New Guinea','Fiji','Samoa','Tonga','Vanuatu','Solomon Islands','Micronesia','Palau','Marshall Islands','Kiribati','Nauru','Tuvalu'])
-const AMERICA = new Set(['Canada','United States','USA','United States of America','Mexico','Brazil','Argentina','Chile','Colombia','Peru','Uruguay','Paraguay','Bolivia','Ecuador','Venezuela','Guyana','Suriname','French Guiana','Panama','Costa Rica','Nicaragua','Honduras','El Salvador','Guatemala','Belize','Cuba','Jamaica','Haiti','Dominican Republic','Bahamas','Barbados','Trinidad and Tobago','Puerto Rico'])
+const EUROPE = new Set(['albania','andorra','austria','belarus','belgium','bosnia and herzegovina','bulgaria','croatia','czech republic','czechia','denmark','estonia','finland','france','germany','greece','hungary','iceland','ireland','italy','kosovo','latvia','liechtenstein','lithuania','luxembourg','malta','moldova','monaco','montenegro','netherlands','north macedonia','norway','poland','portugal','romania','san marino','serbia','slovakia','slovenia','spain','sweden','switzerland','ukraine','vatican city'])
+const ASIA = new Set(['afghanistan','armenia','azerbaijan','bahrain','bangladesh','bhutan','brunei','cambodia','china','cyprus','georgia','india','indonesia','iran','iraq','israel','japan','jordan','kazakhstan','kuwait','kyrgyzstan','laos','lebanon','malaysia','maldives','mongolia','myanmar','nepal','north korea','oman','pakistan','palestine','philippines','qatar','saudi arabia','singapore','south korea','south korea (republic of korea)','sri lanka','taiwan','tajikistan','thailand','timor-leste','turkey','turkmenistan','united arab emirates','uzbekistan','vietnam','yemen','hong kong','macau'])
+const OCEANIA = new Set(['australia','new zealand','papua new guinea','fiji','samoa','tonga','vanuatu','solomon islands','micronesia','palau','marshall islands','kiribati','nauru','tuvalu'])
+const AMERICA = new Set(['canada','united states','usa','united states of america','mexico','brazil','argentina','chile','colombia','peru','uruguay','paraguay','bolivia','ecuador','venezuela','guyana','suriname','french guiana','panama','costa rica','nicaragua','honduras','el salvador','guatemala','belize','cuba','jamaica','haiti','dominican republic','bahamas','barbados','trinidad and tobago','puerto rico'])
+
+function normalise(value: string): string {
+  return value.trim().toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ')
+}
+
+function hasToken(value: string, token: string): boolean {
+  return new RegExp(`(^|[^a-z])${token.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}($|[^a-z])`, 'i').test(value)
+}
 
 export function countryGroup(country: string | null): CountryGroup {
-  const c = (country ?? '').trim()
-  if (/^(UK|United Kingdom|England|Scotland|Wales|Northern Ireland|Great Britain|Britain)$/i.test(c)) return 'UK'
-  if (EUROPE.has(c)) return 'Europe'
-  if (ASIA.has(c)) return 'Asia'
-  if (OCEANIA.has(c)) return 'Oceania'
-  if (AMERICA.has(c)) return 'America'
+  const raw = normalise(country ?? '')
+  if (!raw) return 'Europe'
+
+  // UK is checked first so "United Kingdom / Europe" and "London, UK"
+  // can never be classified as Europe.
+  if (['uk','united kingdom','great britain','britain','england','scotland','wales','northern ireland'].some(x => hasToken(raw, x))) return 'UK'
+  if ([...OCEANIA].some(x => hasToken(raw, x))) return 'Oceania'
+  if ([...AMERICA].some(x => hasToken(raw, x))) return 'America'
+  if ([...ASIA].some(x => hasToken(raw, x))) return 'Asia'
+  if ([...EUROPE].some(x => hasToken(raw, x))) return 'Europe'
+
   return 'Europe'
 }
