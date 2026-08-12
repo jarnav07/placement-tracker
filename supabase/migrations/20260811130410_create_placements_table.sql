@@ -66,7 +66,7 @@
   - updated_at (timestamptz, default now())
 
 2. Automation
-- update_updated_at_column() trigger bumps updated_at on UPDATE (reuses existing function).
+- update_updated_at_column() trigger function bumps updated_at on UPDATE.
 
 3. Realtime
 - Add `placements` to supabase_realtime publication.
@@ -152,6 +152,14 @@ CREATE POLICY "anon_update_placements" ON placements FOR UPDATE
 DROP POLICY IF EXISTS "anon_delete_placements" ON placements;
 CREATE POLICY "anon_delete_placements" ON placements FOR DELETE
   TO anon, authenticated USING (true);
+
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS trigger AS $
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS placements_updated_at ON placements;
 CREATE TRIGGER placements_updated_at BEFORE UPDATE ON placements
