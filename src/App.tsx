@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import type { Placement, OverallPriority, AppStatus } from './lib/supabase'
-import { sortPlacements, PRIORITY_LABELS, PRIORITY_COLORS, SECTORS } from './lib/utils'
+import { PRIORITY_LABELS, PRIORITY_COLORS } from './lib/utils'
+import { filterPlacements, normaliseApplicationStatus, sortFilteredPlacements, type SortOption } from './lib/filtering'
 import { downloadExcel } from './lib/excel'
 import PlacementCard from './components/PlacementCard'
 import './App.css'
@@ -10,25 +11,18 @@ type FilterPriority = 'all' | OverallPriority
 type View = 'opportunities' | 'applications'
 const APP_STAGES: AppStatus[] = ['Saved','Applied','Assessment','Interview','Final Interview','Offer','Accepted','Rejected','Withdrawn']
 
-function normaliseStatus(status: string | null): string {
-  const s = (status ?? '').trim().toLowerCase()
-  if (s === 'open' || s === 'open now' || s.includes('currently open')) return 'Open Now'
-  if (s === 'opening soon' || s.includes('opens soon')) return 'Opening Soon'
-  if (s === 'expected') return 'Expected'
-  if (s.includes('not yet published') || s.includes('not published')) return 'Not Yet Published'
-  if (s === 'closed' || s.includes('closed')) return 'Closed'
-  return status ?? 'Not Yet Published'
-}
-
 export default function App() {
   const [placements, setPlacements] = useState<Placement[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filterPriority, setFilterPriority] = useState<FilterPriority>('all')
   const [filterSector, setFilterSector] = useState('all')
+  const [filterCountry, setFilterCountry] = useState('all')
+  const [filterEngineeringArea, setFilterEngineeringArea] = useState('all')
   const [filterStatus, setFilterStatus] = useState('all')
   const [filterStage, setFilterStage] = useState('all')
   const [search, setSearch] = useState('')
+  const [sortBy, setSortBy] = useState<SortOption>('priority')
   const [view, setView] = useState<View>('opportunities')
   const [newIds, setNewIds] = useState<Set<string>>(new Set())
   const [connected, setConnected] = useState(false)
@@ -68,39 +62,38 @@ export default function App() {
 
   const counts = {
     total: placements.length,
-    open: placements.filter(p => normaliseStatus(p.application_status) === 'Open Now').length,
-    soon: placements.filter(p => normaliseStatus(p.application_status) === 'Opening Soon').length,
-    expected: placements.filter(p => normaliseStatus(p.application_status) === 'Expected').length,
+    open: placements.filter(p => normaliseApplicationStatus(p.application_status) === 'Open Now').length,
+    soon: placements.filter(p => normaliseApplicationStatus(p.application_status) === 'Opening Soon').length,
+    expected: placements.filter(p => normaliseApplicationStatus(p.application_status) === 'Expected').length,
     applied: placements.filter(p => (p.app_status ?? 'Not Applied') !== 'Not Applied').length,
   }
   const priorityCounts: Record<string, number> = { all: placements.length }
   for (const key of Object.keys(PRIORITY_LABELS) as OverallPriority[]) priorityCounts[key] = placements.filter(p => p.overall_priority === key).length
   const sectors = Array.from(new Set(placements.map(p => p.sector).filter(Boolean) as string[])).sort()
+  const countries = Array.from(new Set(placements.map(p => p.country).filter(Boolean) as string[])).sort()
+  const engineeringAreas = Array.from(new Set(placements.map(p => p.engineering_area).filter(Boolean) as string[])).sort()
 
-  const filtered = sortPlacements(placements.filter(p => {
-    if (filterPriority !== 'all' && p.overall_priority !== filterPriority) return false
-    if (filterSector !== 'all' && p.sector !== filterSector) return false
-    if (filterStatus !== 'all' && normaliseStatus(p.application_status) !== filterStatus) return false
-    const stage = p.app_status ?? 'Not Applied'
-    if (view === 'applications' && stage === 'Not Applied') return false
-    if (filterStage !== 'all' && stage !== filterStage) return false
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      const hay = `${p.company} ${p.specific_role} ${p.sector} ${p.city} ${p.country} ${p.engineering_area} ${p.department} ${p.notes} ${p.cv_version}`.toLowerCase()
-      if (!hay.includes(q)) return false
-    }
-    return true
-  }))
+  const filtered = sortFilteredPlacements(filterPlacements(placements, {
+    priority: filterPriority,
+    sector: filterSector,
+    country: filterCountry,
+    engineeringArea: filterEngineeringArea,
+    status: filterStatus,
+    stage: filterStage,
+    search,
+    applicationsOnly: view === 'applications',
+  }), sortBy)
 
   const priorityTabs: { key: FilterPriority; label: string; color: string }[] = [
     { key: 'all', label: 'All', color: '#64748b' },
     { key: 'APPLY_IMMEDIATELY', label: 'Apply Now', color: PRIORITY_COLORS.APPLY_IMMEDIATELY },
     { key: 'APPLY_WHEN_OPENING', label: 'Opening Soon', color: PRIORITY_COLORS.APPLY_WHEN_OPENING },
-    { key: 'HIGH_PRIORITY_WATCH', label: 'High Watch', color: PRIORITY_COLORS.HIGH_PRIORITY_WATCH },
+    { key: 'HIGH_PRIORITY_WATCH', label: 'High Priority', color: PRIORITY_COLORS.HIGH_PRIORITY_WATCH },
     { key: 'GOOD_BACKUP', label: 'Good Backup', color: PRIORITY_COLORS.GOOD_BACKUP },
     { key: 'LOW_PRIORITY', label: 'Low Priority', color: PRIORITY_COLORS.LOW_PRIORITY },
   ]
   const stageCounts = Object.fromEntries(APP_STAGES.map(s => [s, placements.filter(p => (p.app_status ?? 'Not Applied') === s).length])) as Record<string, number>
+  const clearFilters = () => { setFilterPriority('all'); setFilterSector('all'); setFilterCountry('all'); setFilterEngineeringArea('all'); setFilterStatus('all'); setFilterStage('all'); setSearch(''); setSortBy('priority') }
 
   return <div className="app">
     <header className="app-header"><div className="header-content">
@@ -113,9 +106,22 @@ export default function App() {
       <div className="view-switcher"><button className={view === 'opportunities' ? 'active' : ''} onClick={() => setView('opportunities')}>All Opportunities</button><button className={view === 'applications' ? 'active' : ''} onClick={() => setView('applications')}>My Applications <span>{counts.applied}</span></button></div>
       {view === 'opportunities' && <section className="summary-bar">{priorityTabs.map(tab => <button key={tab.key} className={`summary-tab ${filterPriority === tab.key ? 'active' : ''}`} onClick={() => setFilterPriority(tab.key)} style={filterPriority === tab.key ? { borderColor: tab.color } : {}}><span className="tab-dot" style={{ background: tab.color }}/><span className="tab-label">{tab.label}</span><span className="tab-count">{priorityCounts[tab.key] ?? 0}</span></button>)}</section>}
       {view === 'applications' && <section className="pipeline"><div className="pipeline-title"><h2>Application Pipeline</h2><span>{counts.applied} tracked</span></div><div className="pipeline-stages">{APP_STAGES.map(s => <button key={s} className={filterStage === s ? 'active' : ''} onClick={() => setFilterStage(filterStage === s ? 'all' : s)}><strong>{stageCounts[s]}</strong><span>{s}</span></button>)}</div></section>}
-      <section className="controls"><div className="search-box"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input type="text" placeholder={view === 'applications' ? 'Search applications, notes, contacts…' : 'Search companies, roles, locations, areas…'} value={search} onChange={e => setSearch(e.target.value)}/></div><div className="filter-selects"><select value={filterSector} onChange={e => setFilterSector(e.target.value)}><option value="all">All Sectors</option>{sectors.map(s => <option key={s} value={s}>{s}</option>)}</select><select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}><option value="all">All Application Statuses</option><option>Open Now</option><option>Opening Soon</option><option>Expected</option><option>Not Yet Published</option><option>Closed</option></select>{view === 'applications' && <select value={filterStage} onChange={e => setFilterStage(e.target.value)}><option value="all">All My Stages</option>{APP_STAGES.map(s => <option key={s}>{s}</option>)}</select>}<button className="clear-filters" onClick={() => { setFilterPriority('all'); setFilterSector('all'); setFilterStatus('all'); setFilterStage('all'); setSearch('') }}>Clear</button></div></section>
+      <section className="controls">
+        <div className="search-box"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input type="text" placeholder={view === 'applications' ? 'Search applications, notes, contacts…' : 'Search companies, roles, locations, skills…'} value={search} onChange={e => setSearch(e.target.value)}/></div>
+        <div className="filter-selects">
+          <select value={filterPriority} onChange={e => setFilterPriority(e.target.value as FilterPriority)}><option value="all">All Priorities</option>{(Object.keys(PRIORITY_LABELS) as OverallPriority[]).map(k => <option key={k} value={k}>{PRIORITY_LABELS[k]}</option>)}</select>
+          <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}><option value="all">All Application Statuses</option><option>Open Now</option><option>Opening Soon</option><option>Expected</option><option>Not Yet Published</option><option>Closed</option></select>
+          <select value={filterSector} onChange={e => setFilterSector(e.target.value)}><option value="all">All Sectors</option>{sectors.map(s => <option key={s} value={s}>{s}</option>)}</select>
+          <select value={filterCountry} onChange={e => setFilterCountry(e.target.value)}><option value="all">All Countries</option>{countries.map(c => <option key={c} value={c}>{c}</option>)}</select>
+          <select value={filterEngineeringArea} onChange={e => setFilterEngineeringArea(e.target.value)}><option value="all">All Engineering Areas</option>{engineeringAreas.map(a => <option key={a} value={a}>{a}</option>)}</select>
+          {view === 'applications' && <select value={filterStage} onChange={e => setFilterStage(e.target.value)}><option value="all">All My Stages</option>{APP_STAGES.map(s => <option key={s}>{s}</option>)}</select>}
+          <select value={sortBy} onChange={e => setSortBy(e.target.value as SortOption)}><option value="priority">Sort: Personal Priority</option><option value="deadline">Sort: Deadline</option><option value="cv_fit">Sort: CV Fit</option><option value="aerospace">Sort: Aerospace Relevance</option><option value="rocket_space">Sort: Rocket / Space</option><option value="f1">Sort: F1 / Motorsport</option><option value="aero_cfd">Sort: Aero / CFD</option><option value="propulsion">Sort: Propulsion</option><option value="controls">Sort: Controls / Avionics</option><option value="recently_verified">Sort: Recently Verified</option><option value="company">Sort: Company A–Z</option></select>
+          <button className="clear-filters" onClick={clearFilters}>Clear</button>
+        </div>
+      </section>
+      <div className="results-summary"><strong>{filtered.length}</strong> {view === 'applications' ? 'applications' : 'opportunities'} shown{search || filterPriority !== 'all' || filterSector !== 'all' || filterCountry !== 'all' || filterEngineeringArea !== 'all' || filterStatus !== 'all' || filterStage !== 'all' ? ' with filters' : ''}</div>
       {error && <div className="save-error">{error}</div>}
-      {loading ? <div className="state-msg"><div className="spinner"/><p>Loading placements…</p></div> : filtered.length === 0 ? <div className="state-msg"><p>{view === 'applications' ? 'No applications match your filters yet.' : 'No placements match your filters.'}</p><button onClick={() => { setFilterStatus('all'); setFilterStage('all'); setSearch(''); setFilterSector('all'); setFilterPriority('all') }}>Clear filters</button></div> : <section className="placements-grid">{filtered.map(p => <PlacementCard key={p.id} placement={p} isNew={newIds.has(p.id)} onUpdate={updatePlacement}/>)}</section>}
+      {loading ? <div className="state-msg"><div className="spinner"/><p>Loading placements…</p></div> : filtered.length === 0 ? <div className="state-msg"><p>{view === 'applications' ? 'No applications match your filters yet.' : 'No placements match your filters.'}</p><button onClick={clearFilters}>Clear filters</button></div> : <section className="placements-grid">{filtered.map(p => <PlacementCard key={p.id} placement={p} isNew={newIds.has(p.id)} onUpdate={updatePlacement}/>)}</section>}
     </main>
     <footer className="app-footer"><span>{filtered.length} {view === 'applications' ? 'application' : 'placement'}{filtered.length === 1 ? '' : 's'}</span><span className="footer-live"><span className="footer-dot"/> Auto-updates when new roles are added or status changes</span></footer>
   </div>
