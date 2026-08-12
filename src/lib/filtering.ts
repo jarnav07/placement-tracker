@@ -1,28 +1,6 @@
 import type { Placement } from './supabase'
 
-export type CountryGroup = 'UK' | 'EU' | 'Asia' | 'Other'
-export type SectorGroup = 'Aerospace & Space' | 'Defence' | 'Motorsport' | 'Engineering & Technology' | 'Research & Advanced Tech'
-export type SortOption = 'deadline' | 'cv_fit' | 'relevance' | 'company'
-
-const EU_COUNTRIES = new Set(['Austria','Belgium','Bulgaria','Croatia','Cyprus','Czech Republic','Czechia','Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Ireland','Italy','Latvia','Lithuania','Luxembourg','Malta','Netherlands','Poland','Portugal','Romania','Slovakia','Slovenia','Spain','Sweden'])
-const ASIA_COUNTRIES = new Set(['Japan','South Korea','Korea','Singapore','Taiwan','Israel','Malaysia','Thailand','Indonesia','Vietnam','Hong Kong'])
-
-export function countryGroup(country: string | null): CountryGroup {
-  const c = (country ?? '').trim()
-  if (/^(UK|United Kingdom|England|Scotland|Wales|Northern Ireland)$/i.test(c)) return 'UK'
-  if (EU_COUNTRIES.has(c)) return 'EU'
-  if (ASIA_COUNTRIES.has(c)) return 'Asia'
-  return 'Other'
-}
-
-export function sectorGroup(sector: string | null, company = ''): SectorGroup {
-  const s = `${sector ?? ''} ${company}`.toLowerCase()
-  if (/motorsport|formula|f1|racing|race car|automotive/.test(s)) return 'Motorsport'
-  if (/defence|defense|military|security/.test(s)) return 'Defence'
-  if (/research|university|laboratory|advanced research|r&d/.test(s)) return 'Research & Advanced Tech'
-  if (/space|rocket|launch|aerospace|aviation|aircraft|satellite|propulsion/.test(s)) return 'Aerospace & Space'
-  return 'Engineering & Technology'
-}
+export type SortOption = 'priority' | 'deadline' | 'cv_fit' | 'aerospace' | 'rocket_space' | 'f1' | 'aero_cfd' | 'propulsion' | 'controls' | 'recently_verified' | 'company'
 
 export function normaliseApplicationStatus(status: string | null): string {
   const s = (status ?? '').trim().toLowerCase()
@@ -46,8 +24,8 @@ export function filterPlacements(placements: Placement[], filters: { priority:st
   const q = filters.search.trim().toLowerCase()
   return placements.filter(p => {
     if (filters.priority !== 'all' && p.overall_priority !== filters.priority) return false
-    if (filters.sector !== 'all' && sectorGroup(p.sector, p.company) !== filters.sector) return false
-    if (filters.country !== 'all' && countryGroup(p.country) !== filters.country) return false
+    if (filters.sector !== 'all' && p.sector !== filters.sector) return false
+    if (filters.country !== 'all' && p.country !== filters.country) return false
     if (filters.engineeringArea !== 'all' && p.engineering_area !== filters.engineeringArea) return false
     if (filters.status !== 'all' && normaliseApplicationStatus(p.application_status) !== filters.status) return false
     const stage = p.app_status ?? 'Not Applied'
@@ -63,10 +41,13 @@ export function filterPlacements(placements: Placement[], filters: { priority:st
 
 export function sortFilteredPlacements(placements: Placement[], sort: SortOption): Placement[] {
   const priorityOrder: Record<string, number> = { APPLY_IMMEDIATELY:0, APPLY_WHEN_OPENING:1, HIGH_PRIORITY_WATCH:2, GOOD_BACKUP:3, LOW_PRIORITY:4 }
+  const score = (p: Placement, key: keyof Placement) => Number(p[key] ?? 0)
   return [...placements].sort((a,b) => {
     if (sort === 'company') return a.company.localeCompare(b.company)
     if (sort === 'deadline') { const ad=dateFromText(a.exact_deadline), bd=dateFromText(b.exact_deadline); if(ad===null&&bd===null)return 0; if(ad===null)return 1; if(bd===null)return -1; return ad-bd }
-    if (sort === 'cv_fit') return Number(b.cv_fit ?? 0)-Number(a.cv_fit ?? 0) || (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99)
-    return (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99) || Number(b.cv_fit ?? 0)-Number(a.cv_fit ?? 0)
+    if (sort === 'recently_verified') { const ad=dateFromText(a.source_date_checked), bd=dateFromText(b.source_date_checked); if(ad===null&&bd===null)return 0; if(ad===null)return 1; if(bd===null)return -1; return bd-ad }
+    if (sort === 'priority') return (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99)
+    const map: Record<string,keyof Placement> = { cv_fit:'cv_fit', aerospace:'aerospace_relevance', rocket_space:'rocket_space_relevance', f1:'f1_motorsport_relevance', aero_cfd:'aero_cfd_relevance', propulsion:'propulsion_relevance', controls:'controls_avionics_relevance' }
+    return score(b,map[sort]) - score(a,map[sort]) || (priorityOrder[a.overall_priority??'']??99)-(priorityOrder[b.overall_priority??'']??99)
   })
 }
