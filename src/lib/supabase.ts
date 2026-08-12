@@ -9,7 +9,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 
 export type ApplicationStatus = 'Open Now' | 'Opening Soon' | 'Expected' | 'Not Yet Published' | 'Closed'
 export type OverallPriority = 'APPLY_IMMEDIATELY' | 'APPLY_WHEN_OPENING' | 'HIGH_PRIORITY_WATCH' | 'GOOD_BACKUP' | 'LOW_PRIORITY'
-export type AppStatus = 'Not Applied' | 'Applied' | 'Interview' | 'Offer' | 'Rejected'
+export type AppStatus = 'Not Applied' | 'Saved' | 'Applied' | 'Assessment' | 'Interview' | 'Final Interview' | 'Offer' | 'Accepted' | 'Rejected' | 'Withdrawn'
 
 export interface Placement {
   id: string
