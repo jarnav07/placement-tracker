@@ -13,13 +13,9 @@ if (!rawSupabaseUrl || !supabaseKey) {
 let supabaseUrl
 try {
   const parsed = new URL(rawSupabaseUrl)
-
-  // If the secret was entered as https://<project>.supabase.co/rest/v1,
-  // remove the REST path because supabase-js adds /rest/v1 itself.
   parsed.pathname = ''
   parsed.search = ''
   parsed.hash = ''
-
   supabaseUrl = parsed.toString().replace(/\/$/, '')
 } catch {
   console.error(`Invalid SUPABASE_URL secret: ${rawSupabaseUrl}`)
@@ -32,11 +28,10 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
 })
 
 const today = new Date().toISOString().slice(0, 10)
-const timeoutMs = 15000
+const timeoutMs = 20000
 
 function normaliseUrl(value) {
   if (!value) return null
-
   try {
     return new URL(value).toString()
   } catch {
@@ -44,43 +39,48 @@ function normaliseUrl(value) {
   }
 }
 
-async function checkUrl(url) {
+function cleanText(value = '') {
+  return String(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+async function fetchPage(url) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    let response
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 placement-tracker/1.0',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    })
 
-    try {
-      response = await fetch(url, {
-        method: 'HEAD',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'placement-tracker-role-monitor/1.0',
-        },
-      })
-    } catch {
-      response = await fetch(url, {
-        method: 'GET',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'placement-tracker-role-monitor/1.0',
-        },
-      })
-    }
+    const html = await response.text()
 
     return {
       ok: response.ok,
       status: response.status,
       finalUrl: response.url,
+      text: cleanText(html),
     }
   } catch (error) {
     return {
       ok: false,
       status: null,
       finalUrl: url,
+      text: '',
       error: error?.message ?? 'Unknown error',
     }
   } finally {
@@ -89,34 +89,70 @@ async function checkUrl(url) {
 }
 
 /*
- * Keep application availability and priority consistent.
+ * Determine application availability from the actual application page.
  *
- * IMPORTANT:
- * - application_status describes whether the COMPANY is accepting applications.
- * - app_status describes YOUR personal application progress.
- *
- * Therefore this function NEVER changes app_status.
- *
- * Priority transitions:
- *
- * HIGH_PRIORITY_WATCH
- *        ↓ application opens
- * APPLY_IMMEDIATELY
- *
- * APPLY_WHEN_OPENING
- *        ↓ application opens
- * APPLY_IMMEDIATELY
- *
- * APPLY_IMMEDIATELY
- *        ↓ application remains open
- * APPLY_IMMEDIATELY
- *
- * Other priorities are left unchanged.
+ * A URL returning HTTP 200 is NOT enough: many employers keep a permanent
+ * careers/ATS URL alive after a vacancy closes. We therefore look for strong
+ * page-level signals and return null when the page is inconclusive.
  */
-function synchroniseOpenRoleState(placement, applicationIsOpen) {
-  if (!applicationIsOpen) {
-    return {}
+function detectApplicationStatus(pageText) {
+  const text = cleanText(pageText).toLowerCase()
+
+  if (!text) return null
+
+  const closedSignals = [
+    /applications?\s+(?:are\s+)?closed\b/,
+    /applications?\s+(?:are\s+)?no longer (?:being )?accepted\b/,
+    /no longer accepting applications?\b/,
+    /this (?:job|position|vacancy|role)\s+(?:has\s+)?(?:been\s+)?filled\b/,
+    /this (?:job|position|vacancy|role)\s+is\s+closed\b/,
+    /(?:job|position|vacancy|role)\s+closed\b/,
+    /(?:job|position|vacancy|role)\s+is no longer available\b/,
+    /applications?\s+have\s+closed\b/,
+    /the application deadline has passed\b/,
+    /recruitment for this (?:role|position) has closed\b/,
+  ]
+
+  if (closedSignals.some((pattern) => pattern.test(text))) {
+    return 'Closed'
   }
+
+  const openSignals = [
+    /apply now\b/,
+    /apply for this (?:job|position|role)\b/,
+    /submit (?:your )?application\b/,
+    /applications?\s+(?:are\s+)?open\b/,
+    /applications?\s+(?:are\s+)?being accepted\b/,
+    /apply online\b/,
+    /start (?:your )?application\b/,
+    /apply today\b/,
+  ]
+
+  if (openSignals.some((pattern) => pattern.test(text))) {
+    return 'Open Now'
+  }
+
+  return null
+}
+
+/*
+ * Keep the UI's availability and priority badges synchronised.
+ *
+ * Frontend mappings:
+ * APPLY_IMMEDIATELY  = Apply Now
+ * APPLY_WHEN_OPENING = Prepare to Apply
+ * HIGH_PRIORITY_WATCH = Watch Closely
+ *
+ * When an application actually opens:
+ *   Watch Closely      -> Apply Now
+ *   Prepare to Apply   -> Apply Now
+ *   Apply Now          -> stays Apply Now
+ *
+ * app_status is deliberately never changed: opening a job does not mean the
+ * user has applied.
+ */
+function synchroniseState(placement, detectedStatus) {
+  if (!detectedStatus) return {}
 
   const priority = String(placement.overall_priority ?? '')
     .trim()
@@ -124,12 +160,12 @@ function synchroniseOpenRoleState(placement, applicationIsOpen) {
     .replace(/\s+/g, '_')
 
   const updates = {
-    application_status: 'Open Now',
+    application_status: detectedStatus,
   }
 
   if (
-    priority === 'HIGH_PRIORITY_WATCH' ||
-    priority === 'APPLY_WHEN_OPENING'
+    detectedStatus === 'Open Now' &&
+    (priority === 'HIGH_PRIORITY_WATCH' || priority === 'APPLY_WHEN_OPENING')
   ) {
     updates.overall_priority = 'APPLY_IMMEDIATELY'
   }
@@ -162,19 +198,14 @@ async function main() {
   console.log(`Checking ${placements?.length ?? 0} tracked opportunities...`)
 
   let checked = 0
-  let broken = 0
+  let unreachable = 0
   let opened = 0
+  let closed = 0
   let priorityUpdated = 0
+  let inconclusive = 0
 
   for (const placement of placements ?? []) {
-    /*
-     * Only an actual application_link can make a role "Open Now".
-     *
-     * careers_page and source_url are checked for monitoring purposes,
-     * but their being reachable does NOT mean the application is open.
-     */
     const applicationLink = normaliseUrl(placement.application_link)
-
     const candidates = [
       placement.application_link,
       placement.careers_page,
@@ -183,20 +214,25 @@ async function main() {
       .map(normaliseUrl)
       .filter(Boolean)
 
-    if (!candidates.length) {
-      continue
-    }
+    if (!candidates.length) continue
 
     let result = null
     let checkedUrl = null
 
-    for (const url of candidates) {
-      result = await checkUrl(url)
+    /*
+     * Prefer the actual application URL. If it is unavailable, fall back to
+     * careers/source URLs for reachability monitoring, but do not infer an
+     * opening from those fallback pages.
+     */
+    const orderedCandidates = applicationLink
+      ? [applicationLink, ...candidates.filter((url) => url !== applicationLink)]
+      : candidates
+
+    for (const url of orderedCandidates) {
+      result = await fetchPage(url)
       checkedUrl = url
 
-      if (result.ok) {
-        break
-      }
+      if (result.ok) break
     }
 
     checked++
@@ -212,48 +248,54 @@ async function main() {
     }
 
     /*
-     * A role is considered open by this monitor only when:
-     *
-     * 1. It has an actual application_link
-     * 2. That application_link is the URL we successfully checked
-     * 3. The URL is reachable
-     *
-     * A careers page being reachable is NOT enough.
+     * Only infer Open Now/Closed from the actual application link. A generic
+     * company careers page is not sufficient to change application status.
      */
-    const applicationIsOpen = Boolean(
+    const checkedApplicationPage = Boolean(
       applicationLink &&
-      result?.ok &&
-      normaliseUrl(checkedUrl) === applicationLink
+      checkedUrl === applicationLink &&
+      result?.ok
     )
 
-    if (applicationIsOpen) {
-      const previousPriority = placement.overall_priority
+    let detectedStatus = null
 
-      const stateUpdates = synchroniseOpenRoleState(
-        placement,
-        applicationIsOpen
-      )
+    if (checkedApplicationPage) {
+      detectedStatus = detectApplicationStatus(result.text)
 
-      Object.assign(updates, stateUpdates)
+      if (detectedStatus) {
+        const previousPriority = placement.overall_priority
+        const stateUpdates = synchroniseState(placement, detectedStatus)
+        Object.assign(updates, stateUpdates)
 
-      opened++
+        if (detectedStatus === 'Open Now') {
+          opened++
+        } else if (detectedStatus === 'Closed') {
+          closed++
+        }
 
-      if (
-        stateUpdates.overall_priority === 'APPLY_IMMEDIATELY' &&
-        previousPriority !== 'APPLY_IMMEDIATELY'
-      ) {
-        priorityUpdated++
+        if (
+          stateUpdates.overall_priority === 'APPLY_IMMEDIATELY' &&
+          previousPriority !== 'APPLY_IMMEDIATELY'
+        ) {
+          priorityUpdated++
+        }
+
+        console.log(
+          `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+          `${placement.application_status ?? 'TBC'} → ${detectedStatus}` +
+          `${stateUpdates.overall_priority ? `; priority → ${stateUpdates.overall_priority}` : ''}`
+        )
+      } else {
+        inconclusive++
+        console.log(
+          `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+          'application page reachable but status inconclusive; leaving status unchanged'
+        )
       }
-
-      console.log(
-        `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
-        `APPLICATION OPEN → ${stateUpdates.overall_priority ?? previousPriority}`
-      )
     }
 
     if (!result?.ok) {
-      broken++
-
+      unreachable++
       updates.notes =
         `Automated monitor: tracked URL could not be reached on ${today}. ` +
         `${result?.error ?? ''}`.trim()
@@ -269,20 +311,14 @@ async function main() {
         `Failed updating ${placement.company} — ${placement.specific_role}:`,
         updateError.message
       )
-    } else {
-      console.log(
-        `${placement.company} — ` +
-        `${placement.specific_role ?? 'role'}: ` +
-        `${statusText} (${checkedUrl})`
-      )
     }
   }
 
   console.log(
     `Monitor complete: ${checked} checked, ` +
-    `${broken} unreachable, ` +
-    `${opened} applications open, ` +
-    `${priorityUpdated} priority updates.`
+    `${opened} open, ${closed} closed, ` +
+    `${priorityUpdated} priority updates, ` +
+    `${inconclusive} inconclusive, ${unreachable} unreachable.`
   )
 }
 
