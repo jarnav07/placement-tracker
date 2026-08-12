@@ -14,8 +14,8 @@ export function countryGroup(country: string | null): CountryGroup {
   if (OCEANIA_COUNTRIES.has(c)) return 'Oceania'
   if (EUROPE_COUNTRIES.has(c)) return 'Europe'
   if (ASIA_COUNTRIES.has(c)) return 'Asia'
-  // Every company must belong to one of the three international regions.
-  // Unknown countries are assigned to Europe as the fallback so there is no "Other" bucket.
+  // No Other category: every database entry is assigned to one of the four regions.
+  // Unknown locations use Europe as the fallback rather than creating a fifth filter.
   return 'Europe'
 }
 
