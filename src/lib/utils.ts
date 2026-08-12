@@ -1,9 +1,9 @@
 import type { Placement, OverallPriority } from './supabase'
 
 export const PRIORITY_LABELS: Record<OverallPriority, string> = {
-  APPLY_IMMEDIATELY: 'Apply Immediately',
-  APPLY_WHEN_OPENING: 'Apply When Opening',
-  HIGH_PRIORITY_WATCH: 'High Priority Watch',
+  APPLY_IMMEDIATELY: 'Apply Now',
+  APPLY_WHEN_OPENING: 'Top Priority',
+  HIGH_PRIORITY_WATCH: 'High Priority',
   GOOD_BACKUP: 'Good Backup',
   LOW_PRIORITY: 'Low Priority',
 }
@@ -24,27 +24,97 @@ export const PRIORITY_ORDER: Record<OverallPriority, number> = {
   LOW_PRIORITY: 4,
 }
 
-export const SECTORS = ['Aerospace & Defence', 'Rockets & Space', 'F1 & Motorsport', 'Propulsion', 'Research'] as const
+export type NormalizedStatus = 'Open Now' | 'Opening Soon' | 'Expected' | 'Not Yet Published' | 'Closed'
 
-export const STATUS_ORDER: Record<string, number> = {
+export const STATUS_ORDER: Record<NormalizedStatus, number> = {
   'Open Now': 0,
   'Opening Soon': 1,
-  'Expected': 2,
+  Expected: 2,
   'Not Yet Published': 3,
-  'Closed': 4,
+  Closed: 4,
 }
 
-export function sortPlacements(placements: Placement[]): Placement[] {
+/**
+ * Database values have historically used both "Open" and "Open Now".
+ * Keep all status decisions in one place so cards, counts and filters agree.
+ */
+export function normalizeApplicationStatus(value: string | null | undefined): NormalizedStatus {
+  const v = (value ?? '').trim().toLowerCase()
+  if (v === 'open' || v === 'open now' || v === 'currently open' || v.includes('open now')) return 'Open Now'
+  if (v === 'opening soon' || v.includes('opening soon') || v.includes('opens soon')) return 'Opening Soon'
+  if (v === 'expected' || v.includes('expected')) return 'Expected'
+  if (v === 'not yet published' || v.includes('not yet') || v.includes('not published') || v.includes('not currently published')) return 'Not Yet Published'
+  if (v === 'closed' || v.includes('closed') || v.includes('applications closed')) return 'Closed'
+  return 'Not Yet Published'
+}
+
+export function isOpenNow(placement: Placement): boolean {
+  return normalizeApplicationStatus(placement.application_status) === 'Open Now'
+}
+
+export function getPriority(placement: Placement): OverallPriority {
+  const value = placement.overall_priority as OverallPriority | null
+  return value && value in PRIORITY_ORDER ? value : 'LOW_PRIORITY'
+}
+
+export function getSectors(placements: Placement[]): string[] {
+  return Array.from(new Set(placements.map((p) => p.sector?.trim()).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b))
+}
+
+export function getCountries(placements: Placement[]): string[] {
+  return Array.from(new Set(placements.map((p) => p.country?.trim()).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b))
+}
+
+export function getEngineeringAreas(placements: Placement[]): string[] {
+  return Array.from(new Set(placements.map((p) => p.engineering_area?.trim()).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b))
+}
+
+export function sortPlacements(placements: Placement[], mode: string = 'priority'): Placement[] {
   return [...placements].sort((a, b) => {
-    const pa = PRIORITY_ORDER[(a.overall_priority ?? 'LOW_PRIORITY') as OverallPriority] ?? 5
-    const pb = PRIORITY_ORDER[(b.overall_priority ?? 'LOW_PRIORITY') as OverallPriority] ?? 5
+    if (mode === 'deadline') {
+      const da = dateScore(a.exact_deadline)
+      const db = dateScore(b.exact_deadline)
+      if (da !== db) return da - db
+    }
+    if (mode === 'cv_fit') {
+      const diff = (b.cv_fit ?? -1) - (a.cv_fit ?? -1)
+      if (diff !== 0) return diff
+    }
+    if (mode === 'aerospace') {
+      const diff = (b.aerospace_relevance ?? -1) - (a.aerospace_relevance ?? -1)
+      if (diff !== 0) return diff
+    }
+    if (mode === 'space') {
+      const diff = (b.rocket_space_relevance ?? -1) - (a.rocket_space_relevance ?? -1)
+      if (diff !== 0) return diff
+    }
+    if (mode === 'f1') {
+      const diff = (b.f1_motorsport_relevance ?? -1) - (a.f1_motorsport_relevance ?? -1)
+      if (diff !== 0) return diff
+    }
+    if (mode === 'recent') {
+      const diff = new Date(b.source_date_checked ?? b.updated_at).getTime() - new Date(a.source_date_checked ?? a.updated_at).getTime()
+      if (diff !== 0) return diff
+    }
+
+    const pa = PRIORITY_ORDER[getPriority(a)]
+    const pb = PRIORITY_ORDER[getPriority(b)]
     if (pa !== pb) return pa - pb
-    const cv = (b.cv_fit ?? 0) - (a.cv_fit ?? 0)
+    const cv = (b.cv_fit ?? -1) - (a.cv_fit ?? -1)
     if (cv !== 0) return cv
-    const sa = STATUS_ORDER[a.application_status ?? ''] ?? 5
-    const sb = STATUS_ORDER[b.application_status ?? ''] ?? 5
-    return sa - sb
+    const sa = STATUS_ORDER[normalizeApplicationStatus(a.application_status)]
+    const sb = STATUS_ORDER[normalizeApplicationStatus(b.application_status)]
+    if (sa !== sb) return sa - sb
+    return a.company.localeCompare(b.company)
   })
+}
+
+function dateScore(value: string | null): number {
+  if (!value) return Number.MAX_SAFE_INTEGER
+  const match = value.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/)
+  if (match) return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime()
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed
 }
 
 export function scoreBarColor(score: number): string {
@@ -57,11 +127,6 @@ export function scoreBarColor(score: number): string {
 
 export function isTBC(value: string | null): boolean {
   if (!value) return true
-  const v = value.toLowerCase()
-  return v === 'tbc' || v.includes('not publicly') || v.includes('not yet') || v === ''
-}
-
-export function getCountries(placements: Placement[]): string[] {
-  const set = new Set(placements.map((p) => p.country).filter(Boolean) as string[])
-  return Array.from(set).sort()
+  const v = value.toLowerCase().trim()
+  return v === 'tbc' || v === 'n/a' || v.includes('not publicly') || v === ''
 }
