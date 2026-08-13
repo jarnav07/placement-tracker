@@ -63,6 +63,7 @@ export interface Placement {
   interview_date: string | null
   outcome: string | null
   notes: string | null
+  not_interested: boolean | null
   source_url: string | null
   source_type: string | null
   source_date_checked: string | null
