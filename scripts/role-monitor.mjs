@@ -1,7 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Accept either a normal Supabase project URL or a URL accidentally copied
-// with /rest/v1 appended. supabase-js expects the project URL as its base.
 const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 
@@ -62,17 +60,17 @@ async function fetchPage(url) {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 placement-tracker/1.0',
+        'User-Agent': 'Mozilla/5.0 placement-tracker/1.2',
         Accept: 'text/html,application/xhtml+xml',
       },
     })
 
     const html = await response.text()
-
     return {
       ok: response.ok,
       status: response.status,
       finalUrl: response.url,
+      html,
       text: cleanText(html),
     }
   } catch (error) {
@@ -80,6 +78,7 @@ async function fetchPage(url) {
       ok: false,
       status: null,
       finalUrl: url,
+      html: '',
       text: '',
       error: error?.message ?? 'Unknown error',
     }
@@ -89,18 +88,120 @@ async function fetchPage(url) {
 }
 
 /*
- * Determine application availability from the actual application page.
+ * A careers landing page is NOT evidence that a placement is accepting
+ * applications. More importantly, even a job-specific careers page is not
+ * enough if the job on that page is a normal graduate/permanent role.
  *
- * A URL returning HTTP 200 is NOT enough: many employers keep a permanent
- * careers/ATS URL alive after a vacancy closes. We therefore look for strong
- * page-level signals and return null when the page is inconclusive.
+ * Open Now therefore requires BOTH:
+ *   1. a job/application-specific page; and
+ *   2. evidence that the page itself describes the tracked industrial
+ *      placement/internship role.
  */
-function detectApplicationStatus(pageText) {
-  const text = cleanText(pageText).toLowerCase()
+function isGenericCareersPage(url) {
+  if (!url) return true
 
-  if (!text) return null
+  try {
+    const parsed = new URL(url)
+    const path = `${parsed.pathname}${parsed.search}`.toLowerCase()
 
-  const closedSignals = [
+    const genericPatterns = [
+      /(^|\/)careers?(\/|$)/,
+      /(^|\/)early[-_ ]?careers?(\/|$)/,
+      /(^|\/)students?(\/|$)/,
+      /(^|\/)graduates?(\/|$)/,
+      /(^|\/)internships?(\/|$)/,
+      /(^|\/)intern[-_ ]?programs?(\/|$)/,
+      /(^|\/)placements?(\/|$)/,
+      /(^|\/)jobs?(\/|$)$/,
+      /(^|\/)search[-_ ]?(jobs?|all)(\/|$)/,
+      /(^|\/)job[-_ ]?search(\/|$)/,
+    ]
+
+    if (/gradcracker\.com\/hub\/\d+\/[^/]+\/(?:work-placement-internship|job)\/\d+/i.test(url)) {
+      return false
+    }
+
+    return genericPatterns.some((pattern) => pattern.test(path))
+  } catch {
+    return true
+  }
+}
+
+function normaliseSearchText(value = '') {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function hasIndustrialPlacementEvidence(text) {
+  const industrialPatterns = [
+    /industrial placement/,
+    /year in industry/,
+    /year in industry placement/,
+    /sandwich placement/,
+    /sandwich year/,
+    /student placement/,
+    /university placement/,
+    /undergraduate placement/,
+    /engineering placement/,
+    /work placement/,
+    /12 month placement/,
+    /12 month internship/,
+    /placement student/,
+    /placement year/,
+    /co op/,
+    /cooperative education/,
+    /internship/,
+    /intern/,
+  ]
+
+  return industrialPatterns.some((pattern) => pattern.test(text))
+}
+
+function roleMatchesPage(text, specificRole) {
+  const role = normaliseSearchText(specificRole)
+  if (!role) return false
+
+  const page = normaliseSearchText(text)
+  if (!page) return false
+
+  // Avoid requiring every word: role titles often contain location, grade,
+  // punctuation or internal reference numbers that are absent from the page.
+  const stopWords = new Set([
+    'and', 'the', 'for', 'with', 'this', 'year', 'student', 'students',
+    'placement', 'industrial', 'internship', 'intern', 'engineering',
+    'undergraduate', 'university', 'co', 'op', 'uk', 'europe', 'global',
+  ])
+
+  const tokens = role.split(' ').filter((token) => token.length >= 4 && !stopWords.has(token))
+  if (!tokens.length) return hasIndustrialPlacementEvidence(page)
+
+  const meaningfulMatches = tokens.filter((token) => page.includes(token))
+  return meaningfulMatches.length >= Math.min(2, tokens.length)
+}
+
+function isRelevantIndustrialPlacementPage({ text, specificRole }) {
+  const page = normaliseSearchText(text)
+  return hasIndustrialPlacementEvidence(page) && roleMatchesPage(page, specificRole)
+}
+
+function hasStrongOpenSignal(text) {
+  return [
+    /apply\s+now\b/,
+    /apply\s+for\s+this\s+(?:job|position|role)\b/,
+    /submit\s+(?:your\s+)?application\b/,
+    /applications?\s+(?:are\s+)?open\b/,
+    /applications?\s+(?:are\s+)?being accepted\b/,
+    /apply\s+online\b/,
+    /start\s+(?:your\s+)?application\b/,
+    /start\s+application\b/,
+  ].some((pattern) => pattern.test(text))
+}
+
+function hasStrongClosedSignal(text) {
+  return [
     /applications?\s+(?:are\s+)?closed\b/,
     /applications?\s+(?:are\s+)?no longer (?:being )?accepted\b/,
     /no longer accepting applications?\b/,
@@ -111,46 +212,27 @@ function detectApplicationStatus(pageText) {
     /applications?\s+have\s+closed\b/,
     /the application deadline has passed\b/,
     /recruitment for this (?:role|position) has closed\b/,
-  ]
+  ].some((pattern) => pattern.test(text))
+}
 
-  if (closedSignals.some((pattern) => pattern.test(text))) {
-    return 'Closed'
-  }
+function detectApplicationStatus({ url, text, specificRole }) {
+  const clean = cleanText(text).toLowerCase()
 
-  const openSignals = [
-    /apply now\b/,
-    /apply for this (?:job|position|role)\b/,
-    /submit (?:your )?application\b/,
-    /applications?\s+(?:are\s+)?open\b/,
-    /applications?\s+(?:are\s+)?being accepted\b/,
-    /apply online\b/,
-    /start (?:your )?application\b/,
-    /apply today\b/,
-  ]
+  if (!clean || isGenericCareersPage(url)) return null
 
-  if (openSignals.some((pattern) => pattern.test(text))) {
-    return 'Open Now'
-  }
+  // Critical safeguard: a different job going live must never open the
+  // tracked industrial placement. The actual page must contain placement /
+  // internship evidence AND match the tracked role sufficiently.
+  if (!isRelevantIndustrialPlacementPage({ text: clean, specificRole })) return null
+
+  // Closed takes precedence if a page contains stale "apply" text alongside
+  // an explicit closure message.
+  if (hasStrongClosedSignal(clean)) return 'Closed'
+  if (hasStrongOpenSignal(clean)) return 'Open Now'
 
   return null
 }
 
-/*
- * Keep the UI's availability and priority badges synchronised.
- *
- * Frontend mappings:
- * APPLY_IMMEDIATELY  = Apply Now
- * APPLY_WHEN_OPENING = Prepare to Apply
- * HIGH_PRIORITY_WATCH = Watch Closely
- *
- * When an application actually opens:
- *   Watch Closely      -> Apply Now
- *   Prepare to Apply   -> Apply Now
- *   Apply Now          -> stays Apply Now
- *
- * app_status is deliberately never changed: opening a job does not mean the
- * user has applied.
- */
 function synchroniseState(placement, detectedStatus) {
   if (!detectedStatus) return {}
 
@@ -171,6 +253,11 @@ function synchroniseState(placement, detectedStatus) {
   }
 
   return updates
+}
+
+function conservativeStatusAfterUnverifiedOpen(placement) {
+  if (placement.application_status !== 'Open Now') return null
+  return 'Expected'
 }
 
 async function main() {
@@ -201,6 +288,7 @@ async function main() {
   let unreachable = 0
   let opened = 0
   let closed = 0
+  let resetUnverified = 0
   let priorityUpdated = 0
   let inconclusive = 0
 
@@ -219,11 +307,6 @@ async function main() {
     let result = null
     let checkedUrl = null
 
-    /*
-     * Prefer the actual application URL. If it is unavailable, fall back to
-     * careers/source URLs for reachability monitoring, but do not infer an
-     * opening from those fallback pages.
-     */
     const orderedCandidates = applicationLink
       ? [applicationLink, ...candidates.filter((url) => url !== applicationLink)]
       : candidates
@@ -231,7 +314,6 @@ async function main() {
     for (const url of orderedCandidates) {
       result = await fetchPage(url)
       checkedUrl = url
-
       if (result.ok) break
     }
 
@@ -247,10 +329,6 @@ async function main() {
       updated_at: new Date().toISOString(),
     }
 
-    /*
-     * Only infer Open Now/Closed from the actual application link. A generic
-     * company careers page is not sufficient to change application status.
-     */
     const checkedApplicationPage = Boolean(
       applicationLink &&
       checkedUrl === applicationLink &&
@@ -260,18 +338,19 @@ async function main() {
     let detectedStatus = null
 
     if (checkedApplicationPage) {
-      detectedStatus = detectApplicationStatus(result.text)
+      detectedStatus = detectApplicationStatus({
+        url: checkedUrl,
+        text: result.text,
+        specificRole: placement.specific_role,
+      })
 
       if (detectedStatus) {
         const previousPriority = placement.overall_priority
         const stateUpdates = synchroniseState(placement, detectedStatus)
         Object.assign(updates, stateUpdates)
 
-        if (detectedStatus === 'Open Now') {
-          opened++
-        } else if (detectedStatus === 'Closed') {
-          closed++
-        }
+        if (detectedStatus === 'Open Now') opened++
+        else if (detectedStatus === 'Closed') closed++
 
         if (
           stateUpdates.overall_priority === 'APPLY_IMMEDIATELY' &&
@@ -287,11 +366,30 @@ async function main() {
         )
       } else {
         inconclusive++
-        console.log(
-          `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
-          'application page reachable but status inconclusive; leaving status unchanged'
-        )
+        const conservativeStatus = conservativeStatusAfterUnverifiedOpen(placement)
+        if (conservativeStatus) {
+          updates.application_status = conservativeStatus
+          resetUnverified++
+          console.log(
+            `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+            'Open Now could not be proven for the tracked industrial placement; resetting to Expected'
+          )
+        } else {
+          console.log(
+            `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+            'application status inconclusive; leaving status unchanged'
+          )
+        }
       }
+    } else if (placement.application_status === 'Open Now') {
+      updates.application_status = 'Expected'
+      resetUnverified++
+      console.log(
+        `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+        'Open Now could not be verified; resetting to Expected'
+      )
+    } else {
+      inconclusive++
     }
 
     if (!result?.ok) {
@@ -316,7 +414,8 @@ async function main() {
 
   console.log(
     `Monitor complete: ${checked} checked, ` +
-    `${opened} open, ${closed} closed, ` +
+    `${opened} proven open, ${closed} proven closed, ` +
+    `${resetUnverified} stale/unverified Open Now rows reset, ` +
     `${priorityUpdated} priority updates, ` +
     `${inconclusive} inconclusive, ${unreachable} unreachable.`
   )
