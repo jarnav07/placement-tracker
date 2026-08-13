@@ -1,7 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Accept either a normal Supabase project URL or a URL accidentally copied
-// with /rest/v1 appended. supabase-js expects the project URL as its base.
 const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 
@@ -62,13 +60,12 @@ async function fetchPage(url) {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 placement-tracker/1.1',
+        'User-Agent': 'Mozilla/5.0 placement-tracker/1.2',
         Accept: 'text/html,application/xhtml+xml',
       },
     })
 
     const html = await response.text()
-
     return {
       ok: response.ok,
       status: response.status,
@@ -92,13 +89,13 @@ async function fetchPage(url) {
 
 /*
  * A careers landing page is NOT evidence that a placement is accepting
- * applications. Many companies leave their careers/student pages online all
- * year, and those pages often contain generic phrases such as "apply now" for
- * unrelated jobs. Treating those phrases as proof caused false Open Now rows.
+ * applications. More importantly, even a job-specific careers page is not
+ * enough if the job on that page is a normal graduate/permanent role.
  *
- * We therefore only infer Open Now/Closed when the tracked application_link is
- * a job/application-specific page. Generic careers, early-careers, student,
- * internship and search pages are deliberately inconclusive.
+ * Open Now therefore requires BOTH:
+ *   1. a job/application-specific page; and
+ *   2. evidence that the page itself describes the tracked industrial
+ *      placement/internship role.
  */
 function isGenericCareersPage(url) {
   if (!url) return true
@@ -120,8 +117,6 @@ function isGenericCareersPage(url) {
       /(^|\/)job[-_ ]?search(\/|$)/,
     ]
 
-    // A dedicated ATS/job URL is normally identifiable by a job ID or a
-    // deeper job-specific path. Keep known Gradcracker job pages eligible.
     if (/gradcracker\.com\/hub\/\d+\/[^/]+\/(?:work-placement-internship|job)\/\d+/i.test(url)) {
       return false
     }
@@ -130,6 +125,66 @@ function isGenericCareersPage(url) {
   } catch {
     return true
   }
+}
+
+function normaliseSearchText(value = '') {
+  return cleanText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function hasIndustrialPlacementEvidence(text) {
+  const industrialPatterns = [
+    /industrial placement/,
+    /year in industry/,
+    /year in industry placement/,
+    /sandwich placement/,
+    /sandwich year/,
+    /student placement/,
+    /university placement/,
+    /undergraduate placement/,
+    /engineering placement/,
+    /work placement/,
+    /12 month placement/,
+    /12 month internship/,
+    /placement student/,
+    /placement year/,
+    /co op/,
+    /cooperative education/,
+    /internship/,
+    /intern/,
+  ]
+
+  return industrialPatterns.some((pattern) => pattern.test(text))
+}
+
+function roleMatchesPage(text, specificRole) {
+  const role = normaliseSearchText(specificRole)
+  if (!role) return false
+
+  const page = normaliseSearchText(text)
+  if (!page) return false
+
+  // Avoid requiring every word: role titles often contain location, grade,
+  // punctuation or internal reference numbers that are absent from the page.
+  const stopWords = new Set([
+    'and', 'the', 'for', 'with', 'this', 'year', 'student', 'students',
+    'placement', 'industrial', 'internship', 'intern', 'engineering',
+    'undergraduate', 'university', 'co', 'op', 'uk', 'europe', 'global',
+  ])
+
+  const tokens = role.split(' ').filter((token) => token.length >= 4 && !stopWords.has(token))
+  if (!tokens.length) return hasIndustrialPlacementEvidence(page)
+
+  const meaningfulMatches = tokens.filter((token) => page.includes(token))
+  return meaningfulMatches.length >= Math.min(2, tokens.length)
+}
+
+function isRelevantIndustrialPlacementPage({ text, specificRole }) {
+  const page = normaliseSearchText(text)
+  return hasIndustrialPlacementEvidence(page) && roleMatchesPage(page, specificRole)
 }
 
 function hasStrongOpenSignal(text) {
@@ -160,10 +215,15 @@ function hasStrongClosedSignal(text) {
   ].some((pattern) => pattern.test(text))
 }
 
-function detectApplicationStatus({ url, text }) {
+function detectApplicationStatus({ url, text, specificRole }) {
   const clean = cleanText(text).toLowerCase()
 
   if (!clean || isGenericCareersPage(url)) return null
+
+  // Critical safeguard: a different job going live must never open the
+  // tracked industrial placement. The actual page must contain placement /
+  // internship evidence AND match the tracked role sufficiently.
+  if (!isRelevantIndustrialPlacementPage({ text: clean, specificRole })) return null
 
   // Closed takes precedence if a page contains stale "apply" text alongside
   // an explicit closure message.
@@ -173,14 +233,6 @@ function detectApplicationStatus({ url, text }) {
   return null
 }
 
-/*
- * Keep the UI's availability and priority badges synchronised.
- *
- * Frontend mappings:
- * APPLY_IMMEDIATELY  = Apply Now
- * APPLY_WHEN_OPENING = Prepare to Apply
- * HIGH_PRIORITY_WATCH = Watch Closely
- */
 function synchroniseState(placement, detectedStatus) {
   if (!detectedStatus) return {}
 
@@ -204,9 +256,6 @@ function synchroniseState(placement, detectedStatus) {
 }
 
 function conservativeStatusAfterUnverifiedOpen(placement) {
-  // A previously-open row must not remain Open Now merely because its URL is
-  // still reachable or because a generic careers page contains an "Apply"
-  // link. Prefer a false negative to falsely telling the user to apply.
   if (placement.application_status !== 'Open Now') return null
   return 'Expected'
 }
@@ -258,8 +307,6 @@ async function main() {
     let result = null
     let checkedUrl = null
 
-    // Prefer the actual application URL. Fallback URLs are used only for
-    // reachability; they can never establish that a placement is open.
     const orderedCandidates = applicationLink
       ? [applicationLink, ...candidates.filter((url) => url !== applicationLink)]
       : candidates
@@ -267,7 +314,6 @@ async function main() {
     for (const url of orderedCandidates) {
       result = await fetchPage(url)
       checkedUrl = url
-
       if (result.ok) break
     }
 
@@ -295,6 +341,7 @@ async function main() {
       detectedStatus = detectApplicationStatus({
         url: checkedUrl,
         text: result.text,
+        specificRole: placement.specific_role,
       })
 
       if (detectedStatus) {
@@ -302,11 +349,8 @@ async function main() {
         const stateUpdates = synchroniseState(placement, detectedStatus)
         Object.assign(updates, stateUpdates)
 
-        if (detectedStatus === 'Open Now') {
-          opened++
-        } else if (detectedStatus === 'Closed') {
-          closed++
-        }
+        if (detectedStatus === 'Open Now') opened++
+        else if (detectedStatus === 'Closed') closed++
 
         if (
           stateUpdates.overall_priority === 'APPLY_IMMEDIATELY' &&
@@ -322,14 +366,13 @@ async function main() {
         )
       } else {
         inconclusive++
-
         const conservativeStatus = conservativeStatusAfterUnverifiedOpen(placement)
         if (conservativeStatus) {
           updates.application_status = conservativeStatus
           resetUnverified++
           console.log(
             `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
-            'Open Now could not be proven from a job-specific application page; resetting to Expected'
+            'Open Now could not be proven for the tracked industrial placement; resetting to Expected'
           )
         } else {
           console.log(
@@ -339,9 +382,6 @@ async function main() {
         }
       }
     } else if (placement.application_status === 'Open Now') {
-      // If the tracked application link is missing/unreachable and the only
-      // page we can reach is a generic careers page, do not leave a stale
-      // Open Now state behind.
       updates.application_status = 'Expected'
       resetUnverified++
       console.log(
