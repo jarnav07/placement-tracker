@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "monitor": "node scripts/role-monitor.mjs"
+    "monitor": "node scripts/role-monitor.mjs",
+    "verify-tracking-features": "node scripts/verify-tracking-features.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
