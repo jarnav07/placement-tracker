@@ -62,7 +62,7 @@ async function fetchPage(url) {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 placement-tracker/1.0',
+        'User-Agent': 'Mozilla/5.0 placement-tracker/1.1',
         Accept: 'text/html,application/xhtml+xml',
       },
     })
@@ -73,6 +73,7 @@ async function fetchPage(url) {
       ok: response.ok,
       status: response.status,
       finalUrl: response.url,
+      html,
       text: cleanText(html),
     }
   } catch (error) {
@@ -80,6 +81,7 @@ async function fetchPage(url) {
       ok: false,
       status: null,
       finalUrl: url,
+      html: '',
       text: '',
       error: error?.message ?? 'Unknown error',
     }
@@ -89,18 +91,62 @@ async function fetchPage(url) {
 }
 
 /*
- * Determine application availability from the actual application page.
+ * A careers landing page is NOT evidence that a placement is accepting
+ * applications. Many companies leave their careers/student pages online all
+ * year, and those pages often contain generic phrases such as "apply now" for
+ * unrelated jobs. Treating those phrases as proof caused false Open Now rows.
  *
- * A URL returning HTTP 200 is NOT enough: many employers keep a permanent
- * careers/ATS URL alive after a vacancy closes. We therefore look for strong
- * page-level signals and return null when the page is inconclusive.
+ * We therefore only infer Open Now/Closed when the tracked application_link is
+ * a job/application-specific page. Generic careers, early-careers, student,
+ * internship and search pages are deliberately inconclusive.
  */
-function detectApplicationStatus(pageText) {
-  const text = cleanText(pageText).toLowerCase()
+function isGenericCareersPage(url) {
+  if (!url) return true
 
-  if (!text) return null
+  try {
+    const parsed = new URL(url)
+    const path = `${parsed.pathname}${parsed.search}`.toLowerCase()
 
-  const closedSignals = [
+    const genericPatterns = [
+      /(^|\/)careers?(\/|$)/,
+      /(^|\/)early[-_ ]?careers?(\/|$)/,
+      /(^|\/)students?(\/|$)/,
+      /(^|\/)graduates?(\/|$)/,
+      /(^|\/)internships?(\/|$)/,
+      /(^|\/)intern[-_ ]?programs?(\/|$)/,
+      /(^|\/)placements?(\/|$)/,
+      /(^|\/)jobs?(\/|$)$/,
+      /(^|\/)search[-_ ]?(jobs?|all)(\/|$)/,
+      /(^|\/)job[-_ ]?search(\/|$)/,
+    ]
+
+    // A dedicated ATS/job URL is normally identifiable by a job ID or a
+    // deeper job-specific path. Keep known Gradcracker job pages eligible.
+    if (/gradcracker\.com\/hub\/\d+\/[^/]+\/(?:work-placement-internship|job)\/\d+/i.test(url)) {
+      return false
+    }
+
+    return genericPatterns.some((pattern) => pattern.test(path))
+  } catch {
+    return true
+  }
+}
+
+function hasStrongOpenSignal(text) {
+  return [
+    /apply\s+now\b/,
+    /apply\s+for\s+this\s+(?:job|position|role)\b/,
+    /submit\s+(?:your\s+)?application\b/,
+    /applications?\s+(?:are\s+)?open\b/,
+    /applications?\s+(?:are\s+)?being accepted\b/,
+    /apply\s+online\b/,
+    /start\s+(?:your\s+)?application\b/,
+    /start\s+application\b/,
+  ].some((pattern) => pattern.test(text))
+}
+
+function hasStrongClosedSignal(text) {
+  return [
     /applications?\s+(?:are\s+)?closed\b/,
     /applications?\s+(?:are\s+)?no longer (?:being )?accepted\b/,
     /no longer accepting applications?\b/,
@@ -111,26 +157,18 @@ function detectApplicationStatus(pageText) {
     /applications?\s+have\s+closed\b/,
     /the application deadline has passed\b/,
     /recruitment for this (?:role|position) has closed\b/,
-  ]
+  ].some((pattern) => pattern.test(text))
+}
 
-  if (closedSignals.some((pattern) => pattern.test(text))) {
-    return 'Closed'
-  }
+function detectApplicationStatus({ url, text }) {
+  const clean = cleanText(text).toLowerCase()
 
-  const openSignals = [
-    /apply now\b/,
-    /apply for this (?:job|position|role)\b/,
-    /submit (?:your )?application\b/,
-    /applications?\s+(?:are\s+)?open\b/,
-    /applications?\s+(?:are\s+)?being accepted\b/,
-    /apply online\b/,
-    /start (?:your )?application\b/,
-    /apply today\b/,
-  ]
+  if (!clean || isGenericCareersPage(url)) return null
 
-  if (openSignals.some((pattern) => pattern.test(text))) {
-    return 'Open Now'
-  }
+  // Closed takes precedence if a page contains stale "apply" text alongside
+  // an explicit closure message.
+  if (hasStrongClosedSignal(clean)) return 'Closed'
+  if (hasStrongOpenSignal(clean)) return 'Open Now'
 
   return null
 }
@@ -142,14 +180,6 @@ function detectApplicationStatus(pageText) {
  * APPLY_IMMEDIATELY  = Apply Now
  * APPLY_WHEN_OPENING = Prepare to Apply
  * HIGH_PRIORITY_WATCH = Watch Closely
- *
- * When an application actually opens:
- *   Watch Closely      -> Apply Now
- *   Prepare to Apply   -> Apply Now
- *   Apply Now          -> stays Apply Now
- *
- * app_status is deliberately never changed: opening a job does not mean the
- * user has applied.
  */
 function synchroniseState(placement, detectedStatus) {
   if (!detectedStatus) return {}
@@ -171,6 +201,14 @@ function synchroniseState(placement, detectedStatus) {
   }
 
   return updates
+}
+
+function conservativeStatusAfterUnverifiedOpen(placement) {
+  // A previously-open row must not remain Open Now merely because its URL is
+  // still reachable or because a generic careers page contains an "Apply"
+  // link. Prefer a false negative to falsely telling the user to apply.
+  if (placement.application_status !== 'Open Now') return null
+  return 'Expected'
 }
 
 async function main() {
@@ -201,6 +239,7 @@ async function main() {
   let unreachable = 0
   let opened = 0
   let closed = 0
+  let resetUnverified = 0
   let priorityUpdated = 0
   let inconclusive = 0
 
@@ -219,11 +258,8 @@ async function main() {
     let result = null
     let checkedUrl = null
 
-    /*
-     * Prefer the actual application URL. If it is unavailable, fall back to
-     * careers/source URLs for reachability monitoring, but do not infer an
-     * opening from those fallback pages.
-     */
+    // Prefer the actual application URL. Fallback URLs are used only for
+    // reachability; they can never establish that a placement is open.
     const orderedCandidates = applicationLink
       ? [applicationLink, ...candidates.filter((url) => url !== applicationLink)]
       : candidates
@@ -247,10 +283,6 @@ async function main() {
       updated_at: new Date().toISOString(),
     }
 
-    /*
-     * Only infer Open Now/Closed from the actual application link. A generic
-     * company careers page is not sufficient to change application status.
-     */
     const checkedApplicationPage = Boolean(
       applicationLink &&
       checkedUrl === applicationLink &&
@@ -260,7 +292,10 @@ async function main() {
     let detectedStatus = null
 
     if (checkedApplicationPage) {
-      detectedStatus = detectApplicationStatus(result.text)
+      detectedStatus = detectApplicationStatus({
+        url: checkedUrl,
+        text: result.text,
+      })
 
       if (detectedStatus) {
         const previousPriority = placement.overall_priority
@@ -287,11 +322,34 @@ async function main() {
         )
       } else {
         inconclusive++
-        console.log(
-          `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
-          'application page reachable but status inconclusive; leaving status unchanged'
-        )
+
+        const conservativeStatus = conservativeStatusAfterUnverifiedOpen(placement)
+        if (conservativeStatus) {
+          updates.application_status = conservativeStatus
+          resetUnverified++
+          console.log(
+            `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+            'Open Now could not be proven from a job-specific application page; resetting to Expected'
+          )
+        } else {
+          console.log(
+            `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+            'application status inconclusive; leaving status unchanged'
+          )
+        }
       }
+    } else if (placement.application_status === 'Open Now') {
+      // If the tracked application link is missing/unreachable and the only
+      // page we can reach is a generic careers page, do not leave a stale
+      // Open Now state behind.
+      updates.application_status = 'Expected'
+      resetUnverified++
+      console.log(
+        `${placement.company} — ${placement.specific_role ?? 'role'}: ` +
+        'Open Now could not be verified; resetting to Expected'
+      )
+    } else {
+      inconclusive++
     }
 
     if (!result?.ok) {
@@ -316,7 +374,8 @@ async function main() {
 
   console.log(
     `Monitor complete: ${checked} checked, ` +
-    `${opened} open, ${closed} closed, ` +
+    `${opened} proven open, ${closed} proven closed, ` +
+    `${resetUnverified} stale/unverified Open Now rows reset, ` +
     `${priorityUpdated} priority updates, ` +
     `${inconclusive} inconclusive, ${unreachable} unreachable.`
   )
