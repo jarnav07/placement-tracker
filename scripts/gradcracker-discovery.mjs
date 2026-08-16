@@ -19,6 +19,8 @@ const AERO = /aerospace|aeronaut|aerodynamic|avionic|propulsion|flight|space|roc
 function clean(v='') { return String(v).replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/\s+/g,' ').trim() }
 function absolute(href) { try { return new URL(href,'https://www.gradcracker.com').toString() } catch { return href } }
 function field(text,label) { const re=new RegExp(`${label}\\s*:?\\s*([^|]+?)(?=\\s+(?:Deadline|Salary|Location|Degree required|Duration)\\b|$)`,'i'); const m=text.match(re); return m?clean(m[1]):null }
+function rolePart(v=''){return clean(v).toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim()}
+function sameRole(a,b){return rolePart(a.company)===rolePart(b.company)&&rolePart(a.specific_role)===rolePart(b.specific_role)&&(rolePart(a.city)===rolePart(b.city)||!a.city||!b.city)}
 
 async function fetchPage(page) {
   const r=await fetch(page,{headers:{'User-Agent':'Mozilla/5.0 placement-tracker job discovery; contact via GitHub repository'}})
@@ -42,8 +44,13 @@ function parse(html) {
 
 async function main(){
   const all=[]
-  for(const page of SEARCHES){ try { const html=await fetchPage(page); all.push(...parse(html)); console.log(`Gradcracker ${page}: ${parse(html).length} candidates`) } catch(e){ console.error(`GRADCRACKER SOURCE FAILED: ${e.message}`) } }
-  let inserted=0, refreshed=0
+  for(const page of SEARCHES){ try { const html=await fetchPage(page); const parsed=parse(html); all.push(...parsed); console.log(`Gradcracker ${page}: ${parsed.length} candidates`) } catch(e){ console.error(`GRADCRACKER SOURCE FAILED: ${e.message}`) } }
+
+  const {data:notInterested,error:notInterestedError}=await supabase.from('placements').select('id,company,specific_role,city,application_link').eq('app_status','Not Interested')
+  if(notInterestedError) throw notInterestedError
+  const ignored=notInterested||[]
+  let inserted=0, refreshed=0, skipped=0
+
   for(const j of all){
     const t=j.context
     const placement={
@@ -55,11 +62,22 @@ async function main(){
       prestige:7, career_value:8, overall_priority:'HIGH_PRIORITY_WATCH', why_it_fits:'Found through Gradcracker aerospace/STEM placement search.', potential_weaknesses:'Gradcracker listing extraction is automated; verify employer page and eligibility before applying.',
       app_status:'Not Applied', cover_letter_required:'Unknown', source_url:j.href, source_type:'Gradcracker', source_date_checked:TODAY, source_verified:`Gradcracker listing automatically checked ${TODAY}`
     }
+
+    // A role the user has marked Not Interested is completely ignored by discovery.
+    if(ignored.some(r=>r.application_link===placement.application_link || sameRole(r,placement))){
+      skipped++
+      console.log(`SKIPPED (Not Interested): ${placement.company} — ${placement.specific_role}`)
+      continue
+    }
+
     const {data:existing,error:findError}=await supabase.from('placements').select('id,app_status').eq('application_link',j.href).limit(1).maybeSingle()
     if(findError){console.error(`DB LOOKUP FAILED: ${findError.message}`);continue}
-    if(existing){ const {error}=await supabase.from('placements').update({...placement,app_status:existing.app_status??'Not Applied'}).eq('id',existing.id); if(error)console.error(`UPDATE FAILED: ${error.message}`); else refreshed++ }
-    else { const {error}=await supabase.from('placements').insert(placement); if(error)console.error(`INSERT FAILED: ${error.message}`); else {inserted++;console.log(`NEW GRADCRACKER: ${j.title} — ${j.href}`)} }
+    if(existing){
+      // Never refresh a role after it has been marked Not Interested.
+      if(String(existing.app_status??'').trim().toLowerCase()==='not interested'){skipped++;console.log(`SKIPPED (Not Interested): ${placement.company} — ${placement.specific_role}`);continue}
+      const {error}=await supabase.from('placements').update({...placement,app_status:existing.app_status??'Not Applied'}).eq('id',existing.id); if(error)console.error(`UPDATE FAILED: ${error.message}`); else refreshed++
+    } else { const {error}=await supabase.from('placements').insert(placement); if(error)console.error(`INSERT FAILED: ${error.message}`); else {inserted++;console.log(`NEW GRADCRACKER: ${j.title} — ${j.href}`)} }
   }
-  console.log(`GRADCRACKER COMPLETE: ${all.length} candidates, ${inserted} new, ${refreshed} refreshed.`)
+  console.log(`GRADCRACKER COMPLETE: ${all.length} candidates, ${inserted} new, ${refreshed} refreshed, ${skipped} Not Interested skipped.`)
 }
 main().catch(e=>{console.error(e);process.exit(1)})
