@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '')
-const model = process.env.OPENAI_MODEL?.trim() || 'gpt-5.6'
+const model = process.env.OPENAI_MODEL?.trim() || 'gpt-5-mini'
 
 if (!rawSupabaseUrl || !supabaseKey) throw new Error('Missing Supabase secrets')
 if (!openAiKey) throw new Error('Missing OPENAI_API_KEY GitHub Actions secret.')
@@ -23,6 +23,7 @@ const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession
 const today = new Date().toISOString().slice(0, 10)
 const timeoutMs = 60000
 const maxConcurrent = 3
+const weeklyRecheckDays = 7
 
 const schema = {
   type: 'object', additionalProperties: false,
@@ -38,6 +39,44 @@ const schema = {
 }
 
 function normaliseUrl(value) { if (!value) return null; try { return new URL(value).toString() } catch { return null } }
+
+function extractLastAiResearchDate(notes = '') {
+  const matches = [...String(notes).matchAll(/AI research (\d{4}-\d{2}-\d{2}):/g)]
+  return matches.length ? matches[matches.length - 1][1] : null
+}
+
+function daysSince(dateString) {
+  if (!dateString) return Infinity
+  const then = new Date(`${dateString}T00:00:00Z`)
+  const now = new Date(`${today}T00:00:00Z`)
+  return Math.floor((now - then) / 86400000)
+}
+
+function needsAiResearch(role) {
+  const lastResearch = extractLastAiResearchDate(role.notes)
+  const sourceVerification = String(role.source_verified ?? '').toLowerCase()
+  const applicationStatus = String(role.application_status ?? '').toLowerCase()
+
+  // New roles: they have never had an AI research result.
+  if (!lastResearch) return { yes: true, reason: 'new/unresearched role' }
+
+  // Broken/ambiguous URLs should be investigated immediately rather than waiting a week.
+  if (/failed|unreachable|broken|404|not found|unable to reach|could not reach|error/.test(sourceVerification)) {
+    return { yes: true, reason: 'URL/status check indicates a problem' }
+  }
+
+  // Explicitly unknown/ambiguous statuses deserve another research pass.
+  if (/unknown|pending|needs review|ambiguous/.test(applicationStatus)) {
+    return { yes: true, reason: 'ambiguous application status' }
+  }
+
+  // Otherwise, re-research each tracked role once per week rather than twice per day.
+  if (daysSince(lastResearch) >= weeklyRecheckDays) {
+    return { yes: true, reason: `weekly recheck (${daysSince(lastResearch)} days since last AI research)` }
+  }
+
+  return { yes: false, reason: `AI research is current (${lastResearch})` }
+}
 
 function buildPrompt(role) {
   const links = [role.application_link, role.careers_page, role.source_url].map(normaliseUrl).filter(Boolean)
@@ -94,14 +133,14 @@ function canChangeAvailabilityStatus(currentStatus) {
 
 function formatSources(sources = []) { return sources.filter(s => s?.url).slice(0, 5).map(s => `${s.url} — ${s.description}`).join('\n') }
 
-async function processRole(role) {
+async function processRole(role, researchReason) {
   try {
     const result = await askAgent(role)
     const strong = (result.status === 'OPEN' || result.status === 'CLOSED') && result.confidence >= 0.80
     const canUpdate = canChangeAvailabilityStatus(role.application_status)
     const apply = strong && canUpdate
     const sourceText = formatSources(result.sources)
-    const summary = [`AI research ${today}: ${result.status} (${Math.round(result.confidence * 100)}% confidence).`, result.reason, sourceText ? `Sources:\n${sourceText}` : ''].filter(Boolean).join('\n')
+    const summary = [`AI research ${today}: ${result.status} (${Math.round(result.confidence * 100)}% confidence).`, `Reason triggered: ${researchReason}.`, result.reason, sourceText ? `Sources:\n${sourceText}` : ''].filter(Boolean).join('\n')
     const updates = { source_date_checked: today, source_verified: `AI research: ${result.status} (${Math.round(result.confidence * 100)}% confidence); ${result.reason}`, updated_at: new Date().toISOString() }
     if (apply) updates.application_status = result.status === 'OPEN' ? 'Open Now' : 'Closed'
     const existingNotes = role.notes?.trim() || ''
@@ -120,16 +159,31 @@ async function main() {
   console.log(`Using OpenAI model: ${model}`)
   const { data: placements, error } = await supabase.from('placements').select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified, notes')
   if (error) throw error
-  console.log(`AI researching ${placements?.length ?? 0} tracked opportunities...`)
+
+  const selected = []
+  let skipped = 0
+  for (const role of placements ?? []) {
+    const decision = needsAiResearch(role)
+    if (decision.yes) selected.push({ role, reason: decision.reason })
+    else skipped++
+  }
+
+  console.log(`AI research selection: ${selected.length} selected, ${skipped} skipped.`)
+  if (!selected.length) {
+    console.log('No AI research required this run.')
+    return
+  }
+
   let cursor = 0, open = 0, closed = 0, unknown = 0, errors = 0
   async function worker() {
     while (true) {
-      const index = cursor++; if (index >= (placements?.length ?? 0)) return
-      const status = await processRole(placements[index])
+      const index = cursor++; if (index >= selected.length) return
+      const { role, reason } = selected[index]
+      const status = await processRole(role, reason)
       if (status === 'OPEN') open++; else if (status === 'CLOSED') closed++; else if (status === 'UNKNOWN') unknown++; else errors++
     }
   }
-  await Promise.all(Array.from({ length: Math.min(maxConcurrent, placements?.length ?? 0) }, worker))
+  await Promise.all(Array.from({ length: Math.min(maxConcurrent, selected.length) }, worker))
   console.log(`AI research complete: ${open} open, ${closed} closed, ${unknown} unknown, ${errors} errors.`)
 }
 
