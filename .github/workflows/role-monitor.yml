@@ -3,9 +3,10 @@ name: Aerospace Role Discovery
 on:
   workflow_dispatch:
   schedule:
-    # 09:15 and 17:00 Europe/Berlin (07:15 and 15:00 UTC)
-    - cron: '15 7 * * *'
-    - cron: '0 15 * * *'
+    # 09:15 and 17:00 UK time. GitHub cron is UTC, so these are
+    # 09:15/17:00 UTC in winter and 08:15/16:00 UTC in summer.
+    - cron: '15 9 * * *'
+    - cron: '0 17 * * *'
 
 permissions:
   contents: read
