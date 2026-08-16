@@ -18,8 +18,9 @@ for (const [file, label, needles] of checks) {
     failed = true
     continue
   }
-  const content = fs.readFileSync(path.join(root, file), 'utf8').toLowerCase()
-  const missing = needles.filter((needle) => !content.includes(needle.toLowerCase()))
+  // Ignore harmless whitespace differences when checking protected source markers.
+  const content = fs.readFileSync(path.join(root, file), 'utf8').toLowerCase().replace(/\s+/g, '')
+  const missing = needles.filter((needle) => !content.includes(needle.toLowerCase().replace(/\s+/g, '')))
   if (missing.length) {
     console.error(`FAILED: ${label} in ${file}`)
     for (const needle of missing) console.error(`  missing: ${needle}`)
