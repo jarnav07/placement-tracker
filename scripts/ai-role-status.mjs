@@ -150,6 +150,18 @@ function shouldApplyStatus(result) {
   return (result.status === 'OPEN' || result.status === 'CLOSED') && result.confidence >= 0.80
 }
 
+// Never overwrite a user's application-tracking state with an availability state.
+// Availability updates are only safe while the row is in a board availability state.
+function canChangeAvailabilityStatus(currentStatus) {
+  const status = String(currentStatus ?? '').trim().toLowerCase()
+  if (!status) return true
+  const protectedStatuses = [
+    'applied', 'application submitted', 'interview', 'interviewing',
+    'rejected', 'offer', 'offered', 'accepted', 'withdrawn', 'not interested',
+  ]
+  return !protectedStatuses.some(value => status === value || status.includes(value))
+}
+
 function formatSources(sources = []) {
   return sources
     .filter(source => source?.url)
@@ -161,7 +173,9 @@ function formatSources(sources = []) {
 async function processRole(role) {
   try {
     const result = await askAgent(role)
-    const apply = shouldApplyStatus(result)
+    const researchIsStrong = shouldApplyStatus(result)
+    const canUpdateRowStatus = canChangeAvailabilityStatus(role.application_status)
+    const apply = researchIsStrong && canUpdateRowStatus
     const sourceText = formatSources(result.sources)
     const researchSummary = [
       `AI research ${today}: ${result.status} (${Math.round(result.confidence * 100)}% confidence).`,
@@ -175,11 +189,11 @@ async function processRole(role) {
       updated_at: new Date().toISOString(),
     }
 
-    // Only let high-confidence AI research change the application status.
-    // UNKNOWN or low-confidence results never overwrite the existing status.
+    // Only high-confidence AI research can change availability, and never if the
+    // row is already in a user-controlled application-tracking state.
     if (apply) updates.application_status = result.status === 'OPEN' ? 'Open Now' : 'Closed'
 
-    // Keep the research in notes without destroying the user's existing notes.
+    // Keep the latest research while preserving the user's own notes.
     const existingNotes = role.notes?.trim() || ''
     const marker = 'AI research '
     const oldResearchStart = existingNotes.indexOf(marker)
@@ -189,7 +203,8 @@ async function processRole(role) {
     const { error } = await supabase.from('placements').update(updates).eq('id', role.id)
     if (error) throw error
 
-    console.log(`${role.company} — ${role.specific_role ?? 'role'}: ${result.status} (${Math.round(result.confidence * 100)}%); ${apply ? 'STATUS UPDATED' : 'status unchanged'}`)
+    const statusAction = apply ? 'STATUS UPDATED' : canUpdateRowStatus ? 'status unchanged' : 'tracking status protected'
+    console.log(`${role.company} — ${role.specific_role ?? 'role'}: ${result.status} (${Math.round(result.confidence * 100)}%); ${statusAction}`)
     return { status: result.status, applied: apply, confidence: result.confidence }
   } catch (error) {
     console.error(`${role.company} — ${role.specific_role ?? 'role'}: AI research failed: ${error?.message ?? error}`)
