@@ -1,10 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Accept either a normal Supabase project URL or a URL accidentally copied
-// with /rest/v1 appended. supabase-js expects the project URL as its base.
 const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
-
 if (!rawSupabaseUrl || !supabaseKey) {
   console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY GitHub Actions secrets.')
   process.exit(1)
@@ -13,8 +10,6 @@ if (!rawSupabaseUrl || !supabaseKey) {
 let supabaseUrl
 try {
   const parsed = new URL(rawSupabaseUrl)
-  // If the secret was entered as https://<project>.supabase.co/rest/v1,
-  // remove the REST path because supabase-js adds /rest/v1 itself.
   parsed.pathname = ''
   parsed.search = ''
   parsed.hash = ''
@@ -34,35 +29,39 @@ const timeoutMs = 15000
 
 function normaliseUrl(value) {
   if (!value) return null
-  try {
-    return new URL(value).toString()
-  } catch {
-    return null
-  }
+  try { return new URL(value).toString() } catch { return null }
+}
+
+function cleanText(value = '') {
+  return String(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#39;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 async function checkUrl(url) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
-
   try {
     let response
     try {
       response = await fetch(url, {
-        method: 'HEAD',
-        redirect: 'follow',
-        signal: controller.signal,
+        method: 'HEAD', redirect: 'follow', signal: controller.signal,
         headers: { 'User-Agent': 'placement-tracker-role-monitor/1.0' },
       })
     } catch {
       response = await fetch(url, {
-        method: 'GET',
-        redirect: 'follow',
-        signal: controller.signal,
+        method: 'GET', redirect: 'follow', signal: controller.signal,
         headers: { 'User-Agent': 'placement-tracker-role-monitor/1.0' },
       })
     }
-
     return { ok: response.ok, status: response.status, finalUrl: response.url }
   } catch (error) {
     return { ok: false, status: null, finalUrl: url, error: error?.message ?? 'Unknown error' }
@@ -71,37 +70,96 @@ async function checkUrl(url) {
   }
 }
 
+async function fetchPage(url) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {
+      method: 'GET', redirect: 'follow', signal: controller.signal,
+      headers: {
+        'User-Agent': 'placement-tracker-role-monitor/1.0',
+        Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+      },
+    })
+    const html = await response.text()
+    return { ok: response.ok, status: response.status, finalUrl: response.url, text: cleanText(html) }
+  } catch (error) {
+    return { ok: false, status: null, finalUrl: url, text: '', error: error?.message ?? 'Unknown error' }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// HTTP 200 only proves that a webpage exists. Inspect the actual page for
+// job-specific open/closed signals. If neither is conclusive, leave the
+// existing application_status untouched rather than guessing.
+function detectRoleStatus(pageText, roleTitle = '') {
+  const lower = String(pageText || '').replace(/\s+/g, ' ').trim().toLowerCase()
+  const title = String(roleTitle || '').trim().toLowerCase()
+
+  const closedPatterns = [
+    /(?:this|the)\s+(?:job|position|role|vacancy|opportunity)\s+(?:is|has been)\s+(?:closed|filled|removed|withdrawn)/i,
+    /(?:job|position|role|vacancy|opportunity)\s+(?:is|has been)\s+(?:no longer available|closed|filled|withdrawn)/i,
+    /applications?\s+(?:for|to)\s+(?:this|the)\s+(?:role|position|job|vacancy)\s+(?:is|are)\s+(?:closed|no longer being accepted)/i,
+    /(?:applications?|apply)\s+(?:are|is)\s+(?:now\s+)?closed/i,
+    /(?:application|apply)\s+deadline\s+(?:has\s+)?passed/i,
+    /(?:we|the company)\s+(?:are|is)\s+no longer\s+(?:accepting|considering)\s+applications?/i,
+    /(?:sorry|unfortunately)[^.!?]{0,100}(?:position|role|job|vacancy|opportunity)[^.!?]{0,80}(?:closed|filled|no longer available)/i,
+  ]
+
+  const openPatterns = [
+    /(?:apply|submit|send)\s+(?:your\s+)?application/i,
+    /apply\s+(?:now|today)/i,
+    /(?:applications?|candidates?)\s+(?:are|is)\s+(?:still\s+)?(?:being\s+)?accepted/i,
+    /(?:job|position|role|vacancy|opportunity)\s+(?:is|remains)\s+(?:open|available)/i,
+    /(?:click|select)\s+(?:here|below)\s+to\s+apply/i,
+    /(?:submit|complete)\s+(?:an?|your)\s+application/i,
+  ]
+
+  const closedMatch = closedPatterns.find(pattern => pattern.test(lower))
+  if (closedMatch) return { status: 'Closed', confidence: 'high', reason: closedMatch.source }
+
+  const openMatch = openPatterns.find(pattern => pattern.test(lower))
+  if (openMatch) return { status: 'Open Now', confidence: 'high', reason: openMatch.source }
+
+  if (title && lower.includes(title) && /application|candidate|vacancy|position|job details|job description/i.test(lower)) {
+    return { status: 'Unknown', confidence: 'medium', reason: 'Role page found but no definitive status signal.' }
+  }
+
+  return { status: 'Unknown', confidence: 'low', reason: 'No definitive status signal.' }
+}
+
 async function main() {
   console.log(`Using Supabase project: ${new URL(supabaseUrl).hostname}`)
 
   const { data: placements, error } = await supabase
     .from('placements')
     .select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified')
-
-  if (error) {
-    console.error('Supabase query failed:', error)
-    throw error
-  }
+  if (error) throw error
 
   console.log(`Checking ${placements?.length ?? 0} tracked opportunities...`)
 
   let checked = 0
   let broken = 0
+  let open = 0
+  let closed = 0
+  let unknown = 0
 
   for (const placement of placements ?? []) {
     const candidates = [placement.application_link, placement.careers_page, placement.source_url]
-      .map(normaliseUrl)
-      .filter(Boolean)
-
+      .map(normaliseUrl).filter(Boolean)
     if (!candidates.length) continue
 
     let result = null
+    let page = null
     let checkedUrl = null
 
     for (const url of candidates) {
       result = await checkUrl(url)
       checkedUrl = url
-      if (result.ok) break
+      if (!result.ok) continue
+      page = await fetchPage(result.finalUrl || url)
+      if (page.ok) break
     }
 
     checked++
@@ -115,27 +173,38 @@ async function main() {
       updated_at: new Date().toISOString(),
     }
 
-    if (!result?.ok) {
+    if (!result?.ok || !page?.ok) {
       broken++
       updates.notes = `Automated monitor: tracked URL could not be reached on ${today}. ${result?.error ?? ''}`.trim()
+      console.log(`${placement.company} — ${placement.specific_role ?? 'role'}: ${statusText} (${checkedUrl})`)
+    } else {
+      const roleStatus = detectRoleStatus(page.text, placement.specific_role)
+
+      if (roleStatus.status === 'Open Now') {
+        open++
+        updates.application_status = 'Open Now'
+      } else if (roleStatus.status === 'Closed') {
+        closed++
+        updates.application_status = 'Closed'
+      } else {
+        unknown++
+      }
+
+      updates.source_verified = `${statusText}; role status: ${roleStatus.status} (${roleStatus.confidence} confidence); automatically checked ${today}`
+      console.log(`${placement.company} — ${placement.specific_role ?? 'role'}: ${roleStatus.status} (${roleStatus.confidence}) — ${checkedUrl}`)
     }
 
     const { error: updateError } = await supabase
-      .from('placements')
-      .update(updates)
-      .eq('id', placement.id)
-
+      .from('placements').update(updates).eq('id', placement.id)
     if (updateError) {
       console.error(`Failed updating ${placement.company} — ${placement.specific_role}:`, updateError.message)
-    } else {
-      console.log(`${placement.company} — ${placement.specific_role ?? 'role'}: ${statusText} (${checkedUrl})`)
     }
   }
 
-  console.log(`Monitor complete: ${checked} checked, ${broken} unreachable.`)
+  console.log(`Monitor complete: ${checked} checked, ${open} open, ${closed} closed, ${unknown} unknown, ${broken} unreachable.`)
 }
 
-main().catch((error) => {
+main().catch(error => {
   console.error(error)
   process.exit(1)
 })
