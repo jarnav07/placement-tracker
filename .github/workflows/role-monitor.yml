@@ -3,7 +3,9 @@ name: Aerospace Role Discovery
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 */2 * * *'
+    # 09:15 and 17:00 Europe/Berlin (07:15 and 15:00 UTC)
+    - cron: '15 7 * * *'
+    - cron: '0 15 * * *'
 
 permissions:
   contents: read
@@ -41,5 +43,5 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5.6
+          OPENAI_MODEL: gpt-5-mini
         run: node scripts/ai-role-status.mjs
