@@ -6,6 +6,7 @@ import { filterPlacements, normaliseApplicationStatus, sortFilteredPlacements, t
 import { downloadExcel } from './lib/excel'
 import PlacementCard from './components/PlacementCard'
 import './App.css'
+import './mobile.css'
 
 type FilterPriority = 'all' | OverallPriority
 type View = 'opportunities' | 'applications' | 'not-interested'
