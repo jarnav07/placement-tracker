@@ -19,67 +19,80 @@ try {
   throw new Error(`Invalid SUPABASE_URL: ${rawSupabaseUrl}`)
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false, autoRefreshToken: false }, realtime: { enabled: false } })
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: { persistSession: false, autoRefreshToken: false },
+  realtime: { enabled: false },
+})
+
 const today = new Date().toISOString().slice(0, 10)
 const timeoutMs = 60000
 const maxConcurrent = 3
-const weeklyRecheckDays = 7
+const aiRecheckDays = 14
 
 const schema = {
-  type: 'object', additionalProperties: false,
+  type: 'object',
+  additionalProperties: false,
   properties: {
     status: { type: 'string', enum: ['OPEN', 'CLOSED', 'UNKNOWN'] },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
     reason: { type: 'string' },
     exact_role_found: { type: 'boolean' },
     official_source_found: { type: 'boolean' },
-    sources: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' }, description: { type: 'string' } }, required: ['url', 'description'] } },
+    sources: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { url: { type: 'string' }, description: { type: 'string' } },
+        required: ['url', 'description'],
+      },
+    },
   },
   required: ['status', 'confidence', 'reason', 'exact_role_found', 'official_source_found', 'sources'],
 }
 
-function normaliseUrl(value) { if (!value) return null; try { return new URL(value).toString() } catch { return null } }
+function normaliseUrl(value) {
+  if (!value) return null
+  try { return new URL(value).toString() } catch { return null }
+}
 
-function extractLastAiResearchDate(notes = '') {
-  const matches = [...String(notes).matchAll(/AI research (\d{4}-\d{2}-\d{2}):/g)]
-  return matches.length ? matches[matches.length - 1][1] : null
+function getLastAiResearchDate(notes = '') {
+  const matches = [...String(notes).matchAll(/AI research (\d{4}-\d{2}-\d{2})/g)]
+  if (!matches.length) return null
+  return matches[matches.length - 1][1]
 }
 
 function daysSince(dateString) {
   if (!dateString) return Infinity
-  const then = new Date(`${dateString}T00:00:00Z`)
+  const date = new Date(`${dateString}T00:00:00Z`)
   const now = new Date(`${today}T00:00:00Z`)
-  return Math.floor((now - then) / 86400000)
+  return Math.floor((now - date) / 86400000)
 }
 
-function needsAiResearch(role) {
-  const lastResearch = extractLastAiResearchDate(role.notes)
-  const sourceVerification = String(role.source_verified ?? '').toLowerCase()
-  const applicationStatus = String(role.application_status ?? '').toLowerCase()
+function shouldResearch(role) {
+  const sourceVerified = String(role.source_verified ?? '').toLowerCase()
+  const notes = String(role.notes ?? '')
+  const lastAiDate = getLastAiResearchDate(notes)
 
-  // New roles: they have never had an AI research result.
-  if (!lastResearch) return { yes: true, reason: 'new/unresearched role' }
+  // New roles are always researched once.
+  if (!lastAiDate) return { research: true, reason: 'new/no previous AI research' }
 
-  // Broken/ambiguous URLs should be investigated immediately rather than waiting a week.
-  if (/failed|unreachable|broken|404|not found|unable to reach|could not reach|error/.test(sourceVerification)) {
-    return { yes: true, reason: 'URL/status check indicates a problem' }
+  // The deterministic monitor found a broken URL or could not determine status.
+  if (sourceVerified.includes('url check failed') || sourceVerified.includes('role status: unknown')) {
+    return { research: true, reason: 'URL/status check needs AI investigation' }
   }
 
-  // Explicitly unknown/ambiguous statuses deserve another research pass.
-  if (/unknown|pending|needs review|ambiguous/.test(applicationStatus)) {
-    return { yes: true, reason: 'ambiguous application status' }
-  }
+  // Established roles only need an AI re-check every 14 days.
+  const age = daysSince(lastAiDate)
+  if (age >= aiRecheckDays) return { research: true, reason: `${age} days since last AI research` }
 
-  // Otherwise, re-research each tracked role once per week rather than twice per day.
-  if (daysSince(lastResearch) >= weeklyRecheckDays) {
-    return { yes: true, reason: `weekly recheck (${daysSince(lastResearch)} days since last AI research)` }
-  }
-
-  return { yes: false, reason: `AI research is current (${lastResearch})` }
+  return { research: false, reason: `AI research is ${age} days old` }
 }
 
 function buildPrompt(role) {
-  const links = [role.application_link, role.careers_page, role.source_url].map(normaliseUrl).filter(Boolean)
+  const links = [role.application_link, role.careers_page, role.source_url]
+    .map(normaliseUrl).filter(Boolean)
+
   return `You are the application-status research agent for an aerospace engineering placement tracker.
 
 Determine whether THIS EXACT PLACEMENT is currently open for applications as of ${today}.
@@ -107,12 +120,19 @@ Return only the structured result and include the strongest URLs actually used a
 }
 
 async function askAgent(role) {
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST', signal: controller.signal,
+      method: 'POST',
+      signal: controller.signal,
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
-      body: JSON.stringify({ model, tools: [{ type: 'web_search' }], input: buildPrompt(role), text: { format: { type: 'json_schema', name: 'role_status_research', strict: true, schema } } }),
+      body: JSON.stringify({
+        model,
+        tools: [{ type: 'web_search' }],
+        input: buildPrompt(role),
+        text: { format: { type: 'json_schema', name: 'role_status_research', strict: true, schema } },
+      }),
     })
     const body = await response.json()
     if (!response.ok) throw new Error(body?.error?.message || `OpenAI API returned HTTP ${response.status}`)
@@ -121,7 +141,9 @@ async function askAgent(role) {
     if (!['OPEN', 'CLOSED', 'UNKNOWN'].includes(result.status)) throw new Error(`Invalid AI status: ${result.status}`)
     if (!Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1) throw new Error('Invalid AI confidence.')
     return result
-  } finally { clearTimeout(timer) }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function canChangeAvailabilityStatus(currentStatus) {
@@ -131,7 +153,9 @@ function canChangeAvailabilityStatus(currentStatus) {
   return !protectedStatuses.some(value => status === value || status.includes(value))
 }
 
-function formatSources(sources = []) { return sources.filter(s => s?.url).slice(0, 5).map(s => `${s.url} — ${s.description}`).join('\n') }
+function formatSources(sources = []) {
+  return sources.filter(s => s?.url).slice(0, 5).map(s => `${s.url} — ${s.description}`).join('\n')
+}
 
 async function processRole(role, researchReason) {
   try {
@@ -140,51 +164,78 @@ async function processRole(role, researchReason) {
     const canUpdate = canChangeAvailabilityStatus(role.application_status)
     const apply = strong && canUpdate
     const sourceText = formatSources(result.sources)
-    const summary = [`AI research ${today}: ${result.status} (${Math.round(result.confidence * 100)}% confidence).`, `Reason triggered: ${researchReason}.`, result.reason, sourceText ? `Sources:\n${sourceText}` : ''].filter(Boolean).join('\n')
-    const updates = { source_date_checked: today, source_verified: `AI research: ${result.status} (${Math.round(result.confidence * 100)}% confidence); ${result.reason}`, updated_at: new Date().toISOString() }
+    const summary = [
+      `AI research ${today}: ${result.status} (${Math.round(result.confidence * 100)}% confidence).`,
+      `Triggered because: ${researchReason}.`,
+      result.reason,
+      sourceText ? `Sources:\n${sourceText}` : '',
+    ].filter(Boolean).join('\n')
+
+    const updates = {
+      source_date_checked: today,
+      source_verified: `AI research: ${result.status} (${Math.round(result.confidence * 100)}% confidence); ${result.reason}`,
+      updated_at: new Date().toISOString(),
+    }
+
     if (apply) updates.application_status = result.status === 'OPEN' ? 'Open Now' : 'Closed'
+
     const existingNotes = role.notes?.trim() || ''
     const marker = 'AI research '
     const oldResearchStart = existingNotes.indexOf(marker)
     const preservedNotes = oldResearchStart >= 0 ? existingNotes.slice(0, oldResearchStart).trimEnd() : existingNotes
     updates.notes = preservedNotes ? `${preservedNotes}\n\n${summary}` : summary
+
     const { error } = await supabase.from('placements').update(updates).eq('id', role.id)
     if (error) throw error
+
     console.log(`${role.company} — ${role.specific_role ?? 'role'}: ${result.status} (${Math.round(result.confidence * 100)}%); ${apply ? 'STATUS UPDATED' : canUpdate ? 'status unchanged' : 'tracking status protected'}`)
     return result.status
-  } catch (error) { console.error(`${role.company} — ${role.specific_role ?? 'role'}: AI research failed: ${error?.message ?? error}`); return 'ERROR' }
+  } catch (error) {
+    console.error(`${role.company} — ${role.specific_role ?? 'role'}: AI research failed: ${error?.message ?? error}`)
+    return 'ERROR'
+  }
 }
 
 async function main() {
   console.log(`Using OpenAI model: ${model}`)
-  const { data: placements, error } = await supabase.from('placements').select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified, notes')
+  console.log(`Established-role AI recheck interval: ${aiRecheckDays} days`)
+
+  const { data: placements, error } = await supabase
+    .from('placements')
+    .select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified, notes')
   if (error) throw error
 
   const selected = []
   let skipped = 0
+
   for (const role of placements ?? []) {
-    const decision = needsAiResearch(role)
-    if (decision.yes) selected.push({ role, reason: decision.reason })
+    const decision = shouldResearch(role)
+    if (decision.research) selected.push({ role, reason: decision.reason })
     else skipped++
   }
 
-  console.log(`AI research selection: ${selected.length} selected, ${skipped} skipped.`)
-  if (!selected.length) {
-    console.log('No AI research required this run.')
-    return
-  }
+  console.log(`AI selection: ${selected.length} of ${placements?.length ?? 0} roles require research; ${skipped} skipped.`)
 
   let cursor = 0, open = 0, closed = 0, unknown = 0, errors = 0
+
   async function worker() {
     while (true) {
-      const index = cursor++; if (index >= selected.length) return
-      const { role, reason } = selected[index]
-      const status = await processRole(role, reason)
-      if (status === 'OPEN') open++; else if (status === 'CLOSED') closed++; else if (status === 'UNKNOWN') unknown++; else errors++
+      const index = cursor++
+      if (index >= selected.length) return
+      const item = selected[index]
+      const status = await processRole(item.role, item.reason)
+      if (status === 'OPEN') open++
+      else if (status === 'CLOSED') closed++
+      else if (status === 'UNKNOWN') unknown++
+      else errors++
     }
   }
+
   await Promise.all(Array.from({ length: Math.min(maxConcurrent, selected.length) }, worker))
-  console.log(`AI research complete: ${open} open, ${closed} closed, ${unknown} unknown, ${errors} errors.`)
+  console.log(`AI research complete: ${open} open, ${closed} closed, ${unknown} unknown, ${errors} errors, ${skipped} skipped.`)
 }
 
-main().catch(error => { console.error(error); process.exit(1) })
+main().catch(error => {
+  console.error(error)
+  process.exit(1)
+})
