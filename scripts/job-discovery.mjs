@@ -28,37 +28,44 @@ async function webSearch(){const queries=['"year in industry" aerospace engineer
 const TRACKING_FIELDS=['app_status','date_applied','cv_version','cover_letter_required','referral_contact','interview_date','outcome','notes']
 async function insertOrUpdate(job){
   const placement=toPlacement(job)
-  if(!placement.application_link || !placement.company || placement.company==='Company not identified' || !placement.specific_role)return{inserted:0,updated:0}
+  if(!placement.application_link || !placement.company || placement.company==='Company not identified' || !placement.specific_role)return{inserted:0,updated:0,skipped:0}
 
-  // A URL is NOT a role identity. Several roles can share one company careers page.
-  // First look for an exact role identity (company + title + location).
   const {data:roleMatches,error:roleError}=await supabase.from('placements').select('*').eq('company',placement.company).eq('specific_role',placement.specific_role)
   if(roleError)throw roleError
   const exactRole=(roleMatches||[]).find(r=>roleKey(r)===roleKey(placement))
+
+  // A role marked Not Interested is completely ignored: do not refresh it,
+  // change it, or recreate it from discovery results.
+  if(exactRole && String(exactRole.app_status??'').trim().toLowerCase()==='not interested'){
+    console.log(`SKIPPED (Not Interested): ${placement.company} — ${placement.specific_role}`)
+    return{inserted:0,updated:0,skipped:1}
+  }
 
   if(exactRole){
     const preserved=Object.fromEntries(TRACKING_FIELDS.map(k=>[k,exactRole[k]]))
     const {error}=await supabase.from('placements').update({...placement,...preserved}).eq('id',exactRole.id)
     if(error)throw error
-    return{inserted:0,updated:1}
+    return{inserted:0,updated:1,skipped:0}
   }
 
-  // Only use an application URL as an identity when it belongs to the same role.
-  // If the URL is shared by multiple roles, create a new card instead of overwriting.
   const {data:urlMatches,error:urlError}=await supabase.from('placements').select('*').eq('application_link',placement.application_link)
   if(urlError)throw urlError
   const sameUrlRole=(urlMatches||[]).find(r=>roleKey(r)===roleKey(placement))
   if(sameUrlRole){
+    if(String(sameUrlRole.app_status??'').trim().toLowerCase()==='not interested'){
+      console.log(`SKIPPED (Not Interested): ${placement.company} — ${placement.specific_role}`)
+      return{inserted:0,updated:0,skipped:1}
+    }
     const preserved=Object.fromEntries(TRACKING_FIELDS.map(k=>[k,sameUrlRole[k]]))
     const {error}=await supabase.from('placements').update({...placement,...preserved}).eq('id',sameUrlRole.id)
     if(error)throw error
-    return{inserted:0,updated:1}
+    return{inserted:0,updated:1,skipped:0}
   }
 
   const {error}=await supabase.from('placements').insert(placement)
   if(error)throw error
   console.log(`NEW ROLE CARD: ${placement.company} — ${placement.specific_role}${placement.city?' — '+placement.city:''} — ${placement.application_link}`)
-  return{inserted:1,updated:0}
+  return{inserted:1,updated:0,skipped:0}
 }
 
-async function main(){let grad=[],web=[],inserted=0,updated=0,verified=0,rejected=0;try{grad=await gradcracker();console.log(`Gradcracker: fetched ${grad.length} trusted candidates`)}catch(e){console.error(`SOURCE FAILED: Gradcracker: ${e.message}`)}try{web=await webSearch();console.log(`Web search: found ${web.length} unverified candidates`)}catch(e){console.error(`SOURCE FAILED: Web search: ${e.message}`)}for(const job of grad){if(scoreJob(job)<25)continue;const r=await insertOrUpdate(job);inserted+=r.inserted;updated+=r.updated}for(const candidate of web){if(scoreJob(candidate)<25)continue;const verifiedJob=await verifyWebCandidate(candidate);if(!verifiedJob){rejected++;console.log(`REJECTED (web candidate failed employer-page verification): ${candidate.title}`);continue}verified++;const r=await insertOrUpdate(verifiedJob);inserted+=r.inserted;updated+=r.updated}console.log(`DISCOVERY COMPLETE: ${grad.length} Gradcracker candidates trusted, ${web.length} web candidates, ${verified} web candidates verified, ${inserted} new role cards, ${updated} refreshed role cards, ${rejected} web candidates rejected.`)}main().catch(e=>{console.error(e);process.exit(1)})
+async function main(){let grad=[],web=[],inserted=0,updated=0,verified=0,rejected=0,skipped=0;try{grad=await gradcracker();console.log(`Gradcracker: fetched ${grad.length} trusted candidates`)}catch(e){console.error(`SOURCE FAILED: Gradcracker: ${e.message}`)}try{web=await webSearch();console.log(`Web search: found ${web.length} unverified candidates`)}catch(e){console.error(`SOURCE FAILED: Web search: ${e.message}`)}for(const job of grad){if(scoreJob(job)<25)continue;const r=await insertOrUpdate(job);inserted+=r.inserted;updated+=r.updated;skipped+=r.skipped}for(const candidate of web){if(scoreJob(candidate)<25)continue;const verifiedJob=await verifyWebCandidate(candidate);if(!verifiedJob){rejected++;console.log(`REJECTED (web candidate failed employer-page verification): ${candidate.title}`);continue}verified++;const r=await insertOrUpdate(verifiedJob);inserted+=r.inserted;updated+=r.updated;skipped+=r.skipped}console.log(`DISCOVERY COMPLETE: ${grad.length} Gradcracker candidates trusted, ${web.length} web candidates, ${verified} web candidates verified, ${inserted} new role cards, ${updated} refreshed role cards, ${skipped} Not Interested skipped, ${rejected} web candidates rejected.`)}main().catch(e=>{console.error(e);process.exit(1)})

@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 const rawSupabaseUrl = process.env.SUPABASE_URL?.trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '')
-const model = process.env.OPENAI_MODEL?.trim() || 'gpt-5-mini'
+const model = process.env.OPENAI_MODEL?.trim() || 'gpt-5.6-luna'
 
 if (!rawSupabaseUrl || !supabaseKey) throw new Error('Missing Supabase secrets')
 if (!openAiKey) throw new Error('Missing OPENAI_API_KEY GitHub Actions secret.')
@@ -28,6 +28,8 @@ const today = new Date().toISOString().slice(0, 10)
 const timeoutMs = 60000
 const maxConcurrent = 3
 const aiRecheckDays = 14
+const maxWebSearchCalls = 4
+const cacheKey = 'discover-aerospace-role-status-v1'
 
 const schema = {
   type: 'object',
@@ -51,6 +53,27 @@ const schema = {
   required: ['status', 'confidence', 'reason', 'exact_role_found', 'official_source_found', 'sources'],
 }
 
+// Keep the stable research policy in one cacheable prefix. Role-specific data and
+// the current date remain after the cache breakpoint because they change per call.
+const stableInstructions = `You are Discover Aerospace's application-status research agent. Determine whether an EXACT aerospace/engineering placement is currently open for applications.
+
+Research policy:
+1. Research the exact vacancy, not merely the employer or a generic careers page.
+2. Search the web using the exact company and role title; add location/year when useful.
+3. Prefer the employer's official careers/application page. Use reputable secondary sources only as supporting evidence.
+4. A generic careers page is never sufficient evidence that this exact role is open.
+5. If a known vacancy URL is dead, search for the same exact vacancy on the employer site and use a replacement URL if found.
+6. OPEN requires strong evidence that applications for this exact vacancy can currently be submitted.
+7. CLOSED requires strong evidence that this exact vacancy is closed, filled, withdrawn, expired, or no longer accepting applications.
+8. UNKNOWN means the exact role cannot be located or the available evidence is ambiguous.
+9. Never infer OPEN merely because a URL returns HTTP 200.
+10. Never infer CLOSED merely because an old URL returns 404; the vacancy may have moved.
+11. Ignore the database's current status as evidence and make an independent determination.
+12. Be conservative. If evidence conflicts or is weak, return UNKNOWN.
+13. Cite the strongest sources actually used. Prefer official employer evidence.
+14. Stop searching once you have enough high-quality evidence for a confident decision; do not perform unnecessary searches.
+15. Return only the required structured result. Keep the reason concise and sources limited to the strongest evidence.`
+
 function normaliseUrl(value) {
   if (!value) return null
   try { return new URL(value).toString() } catch { return null }
@@ -58,65 +81,45 @@ function normaliseUrl(value) {
 
 function getLastAiResearchDate(notes = '') {
   const matches = [...String(notes).matchAll(/AI research (\d{4}-\d{2}-\d{2})/g)]
-  if (!matches.length) return null
-  return matches[matches.length - 1][1]
+  return matches.length ? matches[matches.length - 1][1] : null
 }
 
 function daysSince(dateString) {
   if (!dateString) return Infinity
-  const date = new Date(`${dateString}T00:00:00Z`)
-  const now = new Date(`${today}T00:00:00Z`)
-  return Math.floor((now - date) / 86400000)
+  return Math.floor((new Date(`${today}T00:00:00Z`) - new Date(`${dateString}T00:00:00Z`)) / 86400000)
+}
+
+function isNotInterested(role) {
+  return String(role.app_status ?? '').trim().toLowerCase() === 'not interested'
 }
 
 function shouldResearch(role) {
+  if (isNotInterested(role)) return { research: false, reason: 'Not Interested' }
   const sourceVerified = String(role.source_verified ?? '').toLowerCase()
-  const notes = String(role.notes ?? '')
-  const lastAiDate = getLastAiResearchDate(notes)
-
-  // New roles are always researched once.
+  const lastAiDate = getLastAiResearchDate(role.notes ?? '')
   if (!lastAiDate) return { research: true, reason: 'new/no previous AI research' }
-
-  // The deterministic monitor found a broken URL or could not determine status.
   if (sourceVerified.includes('url check failed') || sourceVerified.includes('role status: unknown')) {
     return { research: true, reason: 'URL/status check needs AI investigation' }
   }
-
-  // Established roles only need an AI re-check every 14 days.
   const age = daysSince(lastAiDate)
   if (age >= aiRecheckDays) return { research: true, reason: `${age} days since last AI research` }
-
   return { research: false, reason: `AI research is ${age} days old` }
 }
 
-function buildPrompt(role) {
+function buildRolePrompt(role) {
   const links = [role.application_link, role.careers_page, role.source_url]
     .map(normaliseUrl).filter(Boolean)
+  return `Current date: ${today}
 
-  return `You are the application-status research agent for an aerospace engineering placement tracker.
-
-Determine whether THIS EXACT PLACEMENT is currently open for applications as of ${today}.
-
+Exact placement to investigate:
 Company: ${role.company ?? ''}
-Role title: ${role.specific_role ?? ''}
+Role: ${role.specific_role ?? ''}
+Location: ${role.city ?? ''}
 Current database status: ${role.application_status ?? ''}
-Known links:\n${links.length ? links.map(url => `- ${url}`).join('\n') : '- none'}
+Known URLs:
+${links.length ? links.map(url => `- ${url}`).join('\n') : '- none'}
 
-RESEARCH RULES
-1. Research the exact role, not merely the company's careers page.
-2. Search the web for the exact company + role title and relevant placement year/location when useful.
-3. Prefer the employer's official careers/application page as evidence; use reputable secondary sources only as support.
-4. A generic careers page is NOT evidence that this exact role is open.
-5. If an old URL is dead, search for the same exact vacancy on the employer site and cite a replacement if found.
-6. OPEN requires strong evidence applications for this exact vacancy can currently be submitted.
-7. CLOSED requires strong evidence the exact vacancy is closed, filled, withdrawn, expired, or no longer accepting applications.
-8. UNKNOWN means evidence is ambiguous, the exact role cannot be located, or only generic/company-level evidence exists.
-9. Never infer OPEN just because HTTP 200 is returned.
-10. Never infer CLOSED just because an old URL returns 404 if the role may have moved.
-11. Do not use the current database status as evidence; independently research it.
-12. Be conservative. Only return OPEN or CLOSED with high-quality evidence.
-
-Return only the structured result and include the strongest URLs actually used as sources.`
+Determine OPEN, CLOSED, or UNKNOWN for this exact vacancy. Return the structured result only.`
 }
 
 async function askAgent(role) {
@@ -126,20 +129,59 @@ async function askAgent(role) {
     const response = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openAiKey}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${openAiKey}`,
+      },
       body: JSON.stringify({
         model,
+        reasoning: { effort: 'low' },
+        prompt_cache_key: cacheKey,
+        prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+        max_tool_calls: maxWebSearchCalls,
+        max_output_tokens: 500,
         tools: [{ type: 'web_search' }],
-        input: buildPrompt(role),
-        text: { format: { type: 'json_schema', name: 'role_status_research', strict: true, schema } },
+        input: [
+          {
+            type: 'message',
+            role: 'developer',
+            content: [
+              {
+                type: 'input_text',
+                text: stableInstructions,
+                prompt_cache_breakpoint: { mode: 'explicit' },
+              },
+            ],
+          },
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: buildRolePrompt(role) }],
+          },
+        ],
+        text: {
+          verbosity: 'low',
+          format: {
+            type: 'json_schema',
+            name: 'role_status_research',
+            strict: true,
+            schema,
+          },
+        },
       }),
     })
+
     const body = await response.json()
     if (!response.ok) throw new Error(body?.error?.message || `OpenAI API returned HTTP ${response.status}`)
     if (!body?.output_text) throw new Error('OpenAI returned no output_text.')
+
     const result = JSON.parse(body.output_text)
     if (!['OPEN', 'CLOSED', 'UNKNOWN'].includes(result.status)) throw new Error(`Invalid AI status: ${result.status}`)
     if (!Number.isFinite(result.confidence) || result.confidence < 0 || result.confidence > 1) throw new Error('Invalid AI confidence.')
+
+    const cached = body?.usage?.input_tokens_details?.cached_tokens ?? 0
+    const totalInput = body?.usage?.input_tokens ?? 0
+    console.log(`AI usage — ${role.company} / ${role.specific_role}: ${totalInput} input tokens, ${cached} cached`)
     return result
   } finally {
     clearTimeout(timer)
@@ -154,7 +196,8 @@ function canChangeAvailabilityStatus(currentStatus) {
 }
 
 function formatSources(sources = []) {
-  return sources.filter(s => s?.url).slice(0, 5).map(s => `${s.url} — ${s.description}`).join('\n')
+  return sources.filter(s => s?.url).slice(0, 3)
+    .map(s => `${s.url} — ${s.description}`).join('\n')
 }
 
 async function processRole(role, researchReason) {
@@ -180,8 +223,7 @@ async function processRole(role, researchReason) {
     if (apply) updates.application_status = result.status === 'OPEN' ? 'Open Now' : 'Closed'
 
     const existingNotes = role.notes?.trim() || ''
-    const marker = 'AI research '
-    const oldResearchStart = existingNotes.indexOf(marker)
+    const oldResearchStart = existingNotes.indexOf('AI research ')
     const preservedNotes = oldResearchStart >= 0 ? existingNotes.slice(0, oldResearchStart).trimEnd() : existingNotes
     updates.notes = preservedNotes ? `${preservedNotes}\n\n${summary}` : summary
 
@@ -199,22 +241,28 @@ async function processRole(role, researchReason) {
 async function main() {
   console.log(`Using OpenAI model: ${model}`)
   console.log(`Established-role AI recheck interval: ${aiRecheckDays} days`)
+  console.log(`Maximum web searches per AI investigation: ${maxWebSearchCalls}`)
+  console.log('Prompt caching: shared stable research policy, 30-minute TTL')
 
   const { data: placements, error } = await supabase
     .from('placements')
-    .select('id, company, specific_role, application_status, application_link, careers_page, source_url, source_verified, notes')
+    .select('id, company, specific_role, city, application_status, app_status, application_link, careers_page, source_url, source_verified, notes')
   if (error) throw error
 
   const selected = []
   let skipped = 0
+  let notInterestedSkipped = 0
 
   for (const role of placements ?? []) {
     const decision = shouldResearch(role)
     if (decision.research) selected.push({ role, reason: decision.reason })
-    else skipped++
+    else {
+      skipped++
+      if (decision.reason === 'Not Interested') notInterestedSkipped++
+    }
   }
 
-  console.log(`AI selection: ${selected.length} of ${placements?.length ?? 0} roles require research; ${skipped} skipped.`)
+  console.log(`AI selection: ${selected.length} of ${placements?.length ?? 0} roles require research; ${skipped} skipped (${notInterestedSkipped} Not Interested).`)
 
   let cursor = 0, open = 0, closed = 0, unknown = 0, errors = 0
 
@@ -232,7 +280,7 @@ async function main() {
   }
 
   await Promise.all(Array.from({ length: Math.min(maxConcurrent, selected.length) }, worker))
-  console.log(`AI research complete: ${open} open, ${closed} closed, ${unknown} unknown, ${errors} errors, ${skipped} skipped.`)
+  console.log(`AI research complete: ${open} open, ${closed} closed, ${unknown} unknown, ${errors} errors, ${skipped} skipped (${notInterestedSkipped} Not Interested).`)
 }
 
 main().catch(error => {
