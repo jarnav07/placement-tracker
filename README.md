@@ -1,10 +1,6 @@
 # Placement Tracker
 
-[![Open in Bolt](https://bolt.new/static/open-in-bolt.svg)](https://bolt.new/~/sb1-hugekb7z)
-
 A full-stack placement and internship tracking dashboard built with **React, TypeScript, Vite and Supabase**. Placement Tracker helps you discover opportunities, prioritise roles, track applications, and keep your placement search organised in one place.
-
-**Live application:** https://jarnav07.github.io/placement_tracker/
 
 ## Features
 
@@ -173,10 +169,6 @@ Upload Vite dist/ artifact
 GitHub Pages
 ```
 
-The live site is:
-
-**https://jarnav07.github.io/placement_tracker/**
-
 For the GitHub Actions deployment to access Supabase during the Vite build, configure these repository secrets under **Settings → Secrets and variables → Actions**:
 
 ```text
@@ -196,7 +188,7 @@ Recommended workflow:
 2. Test the application locally where practical.
 3. Commit changes to `main`.
 4. GitHub Actions builds and deploys the production site.
-5. Verify the live deployment after the workflow completes.
+5. Verify the deployment after the workflow completes.
 
 When changing the UI, preserve the shared application logic and Supabase data model. Mobile-specific presentation can be modified independently of the desktop presentation.
 
