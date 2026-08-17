@@ -21,8 +21,13 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const status = p.application_status ?? 'TBC'
   const touchStart = useRef<{ x: number; y: number } | null>(null)
   const didSwipe = useRef(false)
+  const hapticTriggered = useRef(false)
   const [swipeX, setSwipeX] = useState(0)
   const [swipeBusy, setSwipeBusy] = useState(false)
+
+  const triggerHaptic = () => {
+    if ('vibrate' in navigator) navigator.vibrate(12)
+  }
 
   const updateSwipe = async (changes: Partial<Placement>) => {
     setSwipeBusy(true)
@@ -54,6 +59,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const touch = e.touches[0]
     touchStart.current = { x: touch.clientX, y: touch.clientY }
     didSwipe.current = false
+    hapticTriggered.current = false
   }
 
   const handleTouchMove = (e: React.TouchEvent<HTMLButtonElement>) => {
@@ -61,9 +67,18 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const touch = e.touches[0]
     const dx = touch.clientX - touchStart.current.x
     const dy = touch.clientY - touchStart.current.y
+
+    // Let normal vertical scrolling continue; only track a clearly horizontal gesture.
     if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return
     e.stopPropagation()
     didSwipe.current = true
+
+    // Give one subtle haptic when the action threshold is first reached.
+    if (Math.abs(dx) >= SWIPE_THRESHOLD && !hapticTriggered.current) {
+      hapticTriggered.current = true
+      triggerHaptic()
+    }
+
     setSwipeX(Math.max(-MAX_SWIPE, Math.min(MAX_SWIPE, dx)))
   }
 
@@ -72,12 +87,16 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const dx = swipeX
     touchStart.current = null
     setSwipeX(0)
+    hapticTriggered.current = false
+
     if (Math.abs(dx) < SWIPE_THRESHOLD) {
       didSwipe.current = false
       return
     }
+
     if (dx < 0) handleSwipeLeft()
     else handleSwipeRight()
+
     window.setTimeout(() => { didSwipe.current = false }, 0)
   }
 
@@ -108,16 +127,19 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
         <span className="mpc-score" style={{ color: scoreBarColor(p.cv_fit ?? 0) }}>{p.cv_fit ?? '?'}</span>
       </div>
       <div className="mpc-role">{p.specific_role ?? 'Role TBC'}</div>
+
       <div className="mpc-badges">
         <span className="mpc-badge priority" style={{ '--badge-color': PRIORITY_COLORS[priority] } as React.CSSProperties}>{priorityLabel}</span>
         <span className="mpc-badge status">{status}</span>
         {appStage && <span className="mpc-badge stage">{appStage}</span>}
       </div>
+
       <div className="mpc-info">
         <span>{p.city ?? p.country ?? 'Location TBC'}</span>
         <span>{p.exact_deadline ?? 'Deadline TBC'}</span>
         <span>{p.salary ?? 'Salary TBC'}</span>
       </div>
+
       <div className="mpc-footer">
         <span className="mpc-sector">{p.sector ?? 'Engineering'}</span>
         <span className="mpc-details">Details <span aria-hidden="true">›</span></span>
