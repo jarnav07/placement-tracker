@@ -25,8 +25,30 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const [swipeX, setSwipeX] = useState(0)
   const [swipeBusy, setSwipeBusy] = useState(false)
 
-  const triggerHaptic = () => {
-    if ('vibrate' in navigator) navigator.vibrate(12)
+  const triggerClick = () => {
+    // Simulate a native tactile click with a very short, quiet Web Audio transient.
+    // This runs from a touch gesture, so mobile browsers are allowed to start the audio context.
+    try {
+      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextClass) return
+      const context = new AudioContextClass()
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      const now = context.currentTime
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(115, now)
+      oscillator.frequency.exponentialRampToValueAtTime(70, now + 0.025)
+      gain.gain.setValueAtTime(0.0001, now)
+      gain.gain.exponentialRampToValueAtTime(0.045, now + 0.002)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.028)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start(now)
+      oscillator.stop(now + 0.03)
+      window.setTimeout(() => void context.close(), 100)
+    } catch {
+      // Haptic/audio feedback is optional; never let it interfere with the swipe.
+    }
   }
 
   const updateSwipe = async (changes: Partial<Placement>) => {
@@ -73,10 +95,10 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     e.stopPropagation()
     didSwipe.current = true
 
-    // Give one subtle haptic when the action threshold is first reached.
+    // Give one simulated tactile click when the action threshold is first reached.
     if (Math.abs(dx) >= SWIPE_THRESHOLD && !hapticTriggered.current) {
       hapticTriggered.current = true
-      triggerHaptic()
+      triggerClick()
     }
 
     setSwipeX(Math.max(-MAX_SWIPE, Math.min(MAX_SWIPE, dx)))
