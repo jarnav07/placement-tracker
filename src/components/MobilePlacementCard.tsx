@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import type { Placement, OverallPriority } from '../lib/supabase'
+import type { Placement, OverallPriority, AppStatus } from '../lib/supabase'
+import { supabase } from '../lib/supabase'
 import { PRIORITY_LABELS, PRIORITY_COLORS, scoreBarColor } from '../lib/utils'
 import './MobilePlacementCard.css'
 
@@ -21,15 +22,42 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const touchStart = useRef<{ x: number; y: number } | null>(null)
   const didSwipe = useRef(false)
   const [swipeX, setSwipeX] = useState(0)
+  const [swipeBusy, setSwipeBusy] = useState(false)
+
+  const updateSwipe = async (changes: Partial<Placement>) => {
+    setSwipeBusy(true)
+    const { error } = await supabase.from('placements').update(changes).eq('id', p.id)
+    setSwipeBusy(false)
+    if (error) console.error(`Could not save ${p.company} swipe action:`, error)
+  }
+
+  const handleSwipeLeft = () => {
+    if (onSwipeLeft) onSwipeLeft()
+    else void updateSwipe({ not_interested: true })
+  }
+
+  const handleSwipeRight = () => {
+    if (onSwipeRight) {
+      onSwipeRight()
+      return
+    }
+
+    const currentlyApplied = (p.app_status ?? 'Not Applied') !== 'Not Applied'
+    void updateSwipe({
+      app_status: (currentlyApplied ? 'Not Applied' : 'Applied') as AppStatus,
+      date_applied: currentlyApplied ? null : (p.date_applied ?? new Date().toISOString().slice(0, 10)),
+    })
+  }
 
   const handleTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
+    if (swipeBusy) return
     const touch = e.touches[0]
     touchStart.current = { x: touch.clientX, y: touch.clientY }
     didSwipe.current = false
   }
 
   const handleTouchMove = (e: React.TouchEvent<HTMLButtonElement>) => {
-    if (!touchStart.current) return
+    if (!touchStart.current || swipeBusy) return
     const touch = e.touches[0]
     const dx = touch.clientX - touchStart.current.x
     const dy = touch.clientY - touchStart.current.y
@@ -52,8 +80,8 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       return
     }
 
-    if (dx < 0) onSwipeLeft?.()
-    else onSwipeRight?.()
+    if (dx < 0) handleSwipeLeft()
+    else handleSwipeRight()
 
     window.setTimeout(() => { didSwipe.current = false }, 0)
   }
