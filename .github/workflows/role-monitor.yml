@@ -17,28 +17,42 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Validate automation scripts
+        run: |
+          node --check scripts/job-discovery.mjs
+          node --check scripts/gradcracker-discovery.mjs
+          node --check scripts/role-monitor.mjs
+          node --check scripts/reliable-role-verification.mjs
+          node --check scripts/ai-role-status.mjs
+
       - name: Discover new aerospace roles
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/job-discovery.mjs
+
       - name: Discover Gradcracker placements
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/gradcracker-discovery.mjs
+
       - name: Verify tracked role links
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: node scripts/role-monitor.mjs
+
       - name: AI research tracked role application status
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
