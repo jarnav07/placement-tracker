@@ -33,7 +33,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
 
   const handleSwipeLeft = () => {
     if (onSwipeLeft) onSwipeLeft()
-    else void updateSwipe({ not_interested: true })
+    else void updateSwipe({ not_interested: !p.not_interested })
   }
 
   const handleSwipeRight = () => {
@@ -61,8 +61,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const touch = e.touches[0]
     const dx = touch.clientX - touchStart.current.x
     const dy = touch.clientY - touchStart.current.y
-
-    // Let normal vertical scrolling continue; only track a clearly horizontal gesture.
     if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return
     e.stopPropagation()
     didSwipe.current = true
@@ -74,15 +72,12 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const dx = swipeX
     touchStart.current = null
     setSwipeX(0)
-
     if (Math.abs(dx) < SWIPE_THRESHOLD) {
       didSwipe.current = false
       return
     }
-
     if (dx < 0) handleSwipeLeft()
     else handleSwipeRight()
-
     window.setTimeout(() => { didSwipe.current = false }, 0)
   }
 
@@ -95,7 +90,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     onOpen()
   }
 
-  const swipeLabel = swipeX <= -35 ? 'Not interested' : swipeX >= 35 ? (appStage ? 'Unapply' : 'Apply') : null
+  const swipeLabel = swipeX <= -35 ? (p.not_interested ? 'Back to opportunities' : 'Not interested') : swipeX >= 35 ? (appStage ? 'Unapply' : 'Apply') : null
 
   return (
     <button
@@ -113,19 +108,16 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
         <span className="mpc-score" style={{ color: scoreBarColor(p.cv_fit ?? 0) }}>{p.cv_fit ?? '?'}</span>
       </div>
       <div className="mpc-role">{p.specific_role ?? 'Role TBC'}</div>
-
       <div className="mpc-badges">
         <span className="mpc-badge priority" style={{ '--badge-color': PRIORITY_COLORS[priority] } as React.CSSProperties}>{priorityLabel}</span>
         <span className="mpc-badge status">{status}</span>
         {appStage && <span className="mpc-badge stage">{appStage}</span>}
       </div>
-
       <div className="mpc-info">
         <span>{p.city ?? p.country ?? 'Location TBC'}</span>
         <span>{p.exact_deadline ?? 'Deadline TBC'}</span>
         <span>{p.salary ?? 'Salary TBC'}</span>
       </div>
-
       <div className="mpc-footer">
         <span className="mpc-sector">{p.sector ?? 'Engineering'}</span>
         <span className="mpc-details">Details <span aria-hidden="true">›</span></span>
