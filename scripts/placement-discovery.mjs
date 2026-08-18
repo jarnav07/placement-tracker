@@ -124,7 +124,6 @@ async function discoverOnce(query) {
       },
       body: JSON.stringify({
         model,
-        reasoning: { effort: 'medium' },
         max_tool_calls: MAX_DISCOVERY_SEARCHES,
         max_output_tokens: 4000,
         tools: [{ type: 'web_search' }],
@@ -133,7 +132,6 @@ async function discoverOnce(query) {
           { role: 'user', content: [{ type: 'input_text', text: 'Search now and return 2027-start student placement candidates for this theme: ' + query }] }
         ],
         text: {
-          verbosity: 'medium',
           format: {
             type: 'json_schema',
             name: 'placement_discovery_candidates',

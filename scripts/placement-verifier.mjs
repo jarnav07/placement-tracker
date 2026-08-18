@@ -176,7 +176,6 @@ async function ask(role) {
       },
       body: JSON.stringify({
         model,
-        reasoning: { effort: 'medium' },
         max_tool_calls: MAX_WEB_SEARCHES,
         max_output_tokens: MAX_OUTPUT_TOKENS,
         tools: [{ type: 'web_search' }],
@@ -185,7 +184,6 @@ async function ask(role) {
           { role: 'user', content: [{ type: 'input_text', text: buildPrompt(role) }] }
         ],
         text: {
-          verbosity: 'medium',
           format: {
             type: 'json_schema',
             name: 'placement_2027_availability',
