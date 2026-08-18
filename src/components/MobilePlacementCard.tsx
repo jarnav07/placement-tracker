@@ -47,7 +47,9 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     card.classList.toggle('is-dragging', !animate)
 
     animationFrame.current = requestAnimationFrame(() => {
-      card.style.transform = `translate3d(${clamped}px, 0, 0)`
+      const rotation = Math.max(-4, Math.min(4, clamped * 0.028))
+      const scale = 1 - Math.min(Math.abs(clamped) / MAX_SWIPE, 1) * 0.012
+      card.style.transform = `translate3d(${clamped}px, 0, 0) rotate(${rotation}deg) scale(${scale})`
       animationFrame.current = null
     })
   }
@@ -56,23 +58,11 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const card = cardRef.current
     if (!card) return
     card.classList.remove('is-dragging')
-    card.style.transform = 'translate3d(0, 0, 0)'
+    card.style.transform = 'translate3d(0, 0, 0) rotate(0deg) scale(1)'
     swipeX.current = 0
   }
 
   const triggerClick = () => {
-    // Use the platform haptic API where it exists (e.g. Android Chrome).
-    // iOS Safari/PWA does not expose a web haptic API, so the audio transient
-    // below provides a subtle fallback. A true iOS Taptic Engine response
-    // requires a native wrapper/bridge such as Capacitor.
-    try {
-      if ('vibrate' in navigator) {
-        navigator.vibrate(10)
-      }
-    } catch {
-      // Haptic feedback is optional.
-    }
-
     try {
       const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       if (!AudioContextClass) return
@@ -148,7 +138,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
 
   const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (swipeBusy.current || activePointerId.current !== null) return
-
     if (resetTimer.current !== null) {
       window.clearTimeout(resetTimer.current)
       resetTimer.current = null
@@ -165,7 +154,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     try {
       e.currentTarget.setPointerCapture(e.pointerId)
     } catch {
-      // Pointer capture is an enhancement; the gesture can still continue without it.
+      // Pointer capture is an enhancement.
     }
 
     cardRef.current?.classList.add('is-dragging')
@@ -204,29 +193,21 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
 
   const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (activePointerId.current !== e.pointerId || !pointerStart.current) return
-
     try {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId)
-      }
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
     } catch {
       // Ignore browsers without pointer capture support.
     }
-
     finishSwipe()
   }
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
     if (activePointerId.current !== e.pointerId || !pointerStart.current) return
-
     try {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId)
-      }
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
     } catch {
       // Ignore browsers without pointer capture support.
     }
-
     pointerStart.current = null
     activePointerId.current = null
     gestureAxis.current = null
