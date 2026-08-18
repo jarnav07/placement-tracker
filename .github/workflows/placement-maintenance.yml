@@ -2,8 +2,11 @@ name: Placement Maintenance
 
 on:
   schedule:
-    # Twice a day (04:00 and 16:00 UTC).
-    - cron: '0 4,16 * * *'
+    # 09:30 and 18:00 UK time. GitHub cron is UTC and ignores UK daylight saving,
+    # so these are 08:30/17:00 UTC during British Summer Time (Mar-Oct);
+    # in winter (GMT) they will run one hour earlier in UK local time.
+    - cron: '30 8 * * *'
+    - cron: '0 17 * * *'
   workflow_dispatch:
 
 permissions:

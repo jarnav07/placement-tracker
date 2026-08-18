@@ -141,7 +141,7 @@ Database security should be enforced with Supabase Row Level Security (RLS) poli
 
 ## Automated maintenance (discovery + audit)
 
-A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (04:00 and 16:00 UTC) and can also be triggered manually from the Actions tab.
+A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (09:30 and 18:00 UK time) and can also be triggered manually from the Actions tab.
 
 It has three modes:
 
