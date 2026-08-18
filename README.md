@@ -143,25 +143,31 @@ Database security should be enforced with Supabase Row Level Security (RLS) poli
 
 A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (04:00 and 16:00 UTC) and can also be triggered manually from the Actions tab.
 
-Each run does two things, in order:
+It has two modes:
 
-1. **Discover** (`npm run discover`, `scripts/placement-discovery.mjs`) — searches for new **2027-start** student placements in aerospace, space, rockets, satellites, motorsport and general engineering, verifies each candidate's programme, exact role, intake and opening status, and inserts only confirmed valid entries.
+- **Deterministic (default — no AI, no API credits).** The **audit** fetches each tracked placement's links and applies conservative 2027 + student + open/closed signal rules. A card only changes when the evidence is explicit; ambiguous roles are left unchanged. The **discovery** step is skipped.
+- **AI-assisted (opt-in).** Set the `USE_OPENAI` repository variable to `true` (and add `OPENAI_API_KEY`) to enable AI web research for discovery and more thorough verification.
+
+Each run:
+
+1. **Discover** (`npm run discover`, `scripts/placement-discovery.mjs`) — in AI-assisted mode this searches for new **2027-start** student placements in aerospace, space, rockets, satellites, motorsport and general engineering, verifies each candidate's programme, exact role, intake and opening status, and inserts only confirmed valid entries. It is skipped in deterministic mode to save credits.
 2. **Audit** (`npm run audit`, `scripts/placement-audit.mjs`) — re-verifies **every** placement row and updates `application_status` (and, when verified, opening date, deadline and link) so cards reflect the latest availability.
 
 ### Verification safety rules
 
 - Only placements that **start in 2027** are tracked. A closed **2026** intake is never treated as a closed **2027** intake.
-- A role is only added or flipped to **Open Now** when the exact student role, the 2027 intake and a direct application entry are all verified on official employer sources.
-- Unverifiable roles are left unchanged or marked **Not Yet Published** / **Expected** rather than guessed.
+- A role is only added or flipped to **Open Now** when the exact student role and the 2027 intake are verified. In deterministic mode this means strong, explicit page signals (2027 + student terms + the exact role + an apply/open signal).
+- Unverifiable roles are left unchanged or marked **Not Yet Published** / **Expected** rather than guessed (AI mode).
 - The audit **never deletes rows** and **never touches** your application-tracking fields (`app_status`, dates, CV version, referral, interview, outcome, notes, Not Interested).
 
 ### Required GitHub Actions secrets
 
-| Secret | Purpose |
+| Secret / variable | Purpose |
 | --- | --- |
 | `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
-| `OPENAI_API_KEY` | Powers web research and rigorous verification |
+| `OPENAI_API_KEY` (optional) | Only needed when `USE_OPENAI=true` |
+| `USE_OPENAI` (repository variable, optional) | Set to `true` to enable AI-assisted discovery + verification |
 
 Optional: `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY` or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
 

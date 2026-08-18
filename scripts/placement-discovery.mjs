@@ -7,19 +7,23 @@
 // "why it fits" fields are left null for the user to assess.
 
 import { createClient } from '@supabase/supabase-js'
-import { verifyPlacement, TODAY, model } from './placement-verifier.mjs'
+import { verifyPlacement, TODAY, model, useOpenAi } from './placement-verifier.mjs'
 
 const rawSupabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '')
   .trim().replace(/^['"]|['"]$/g, '')
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim().replace(/^['"]|['"]$/g, '')
 const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '')
 
+if (!useOpenAi) {
+  console.log('Discovery skipped: deterministic (no-AI) mode is active. Set USE_OPENAI=true to enable AI-powered discovery. No credits used.')
+  process.exit(0)
+}
 if (!rawSupabaseUrl || !supabaseKey) {
   console.error('Missing SUPABASE_URL (or VITE_SUPABASE_URL) or SUPABASE_SERVICE_ROLE_KEY.')
   process.exit(1)
 }
 if (!openAiKey) {
-  console.error('Missing OPENAI_API_KEY.')
+  console.error('USE_OPENAI=true but OPENAI_API_KEY is missing.')
   process.exit(1)
 }
 

@@ -1,27 +1,234 @@
-// Shared high-precision verifier for the placement maintenance pipeline.
+// Shared verifier for the placement maintenance pipeline.
 //
-// This module is intentionally side-effect free: it only calls OpenAI and returns
-// a structured result. The discovery and audit scripts decide what to write to the
-// database. The tracked intake is 2027 (placements that START in 2027).
+// Two modes:
+//   1. DETERMINISTIC (default, zero API credits): fetches the tracked URLs and
+//      applies conservative 2027 + student + open/closed signal rules. It only
+//      changes a card when the evidence is explicit; otherwise it leaves the
+//      existing status untouched (no guessing).
+//   2. AI (opt-in): set USE_OPENAI=true and provide OPENAI_API_KEY to run the
+//      high-precision OpenAI web-research verifier instead.
+//
+// The tracked intake is 2027 (placements that START in 2027).
 
-const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '')
+const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '') || ''
 const model = process.env.OPENAI_MODEL?.trim().replace(/^['"]|['"]$/g, '') || 'gpt-4o-mini'
-
-if (!openAiKey) {
-  console.error('Missing OPENAI_API_KEY. Set it as a GitHub Actions secret (or env var).')
-  process.exit(1)
-}
+const useOpenAi = process.env.USE_OPENAI === 'true'
 
 const TODAY = new Date().toISOString().slice(0, 10)
 const TARGET_INTAKE = '2027'
+
+// ---------------------------------------------------------------------------
+// Deterministic (no-AI) verification
+// ---------------------------------------------------------------------------
+
+const DET_TIMEOUT_MS = 15000
+const DET_MAX_PAGES = 3
+
+function extractText(html) {
+  return String(html ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#x27;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function normaliseUrl(value) {
+  if (!value) return null
+  try { return new URL(value).toString() } catch { return null }
+}
+
+async function fetchPage(url) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DET_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8'
+      }
+    })
+    if (!response.ok) return null
+    const html = await response.text()
+    const text = extractText(html)
+    if (!text || text.length < 40) return null
+    return { url: response.url, text }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function norm(value = '') {
+  return String(value).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'into', 'from', 'this', 'that', 'your', 'you', 'are',
+  'will', 'have', 'has', 'not', 'our', 'all', 'any', 'year', 'role', 'job', 'work',
+  'within', 'across', 'about', 'their', 'they', 'its', 'was', 'were', 'been'
+])
+
+function roleTitleWords(specificRole) {
+  return norm(specificRole)
+    .split(' ')
+    .filter(word => word.length >= 4 && !STOPWORDS.has(word))
+}
+
+function roleTitleFound(text, words) {
+  if (!words.length) return false
+  const present = words.filter(word => text.includes(word))
+  if (words.length <= 2) return present.length === words.length
+  return present.length >= Math.max(2, Math.ceil(words.length * 0.6))
+}
+
+function detectSignals(text, roleWords) {
+  const lower = text.toLowerCase()
+  const has2027 = /\b2027\b/.test(lower)
+  const student = /industrial placement|year in industry|placement year|sandwich (?:year|placement)|internship|co-?op|undergraduate placement|student placement|12-?month placement/i.test(lower)
+  const openSignal = (
+    /apply (?:now|online|here|today|directly)/i.test(lower) ||
+    /start (?:your )?application|submit (?:your )?application/i.test(lower) ||
+    /applications? (?:are |is )?(?:now )?open/i.test(lower) ||
+    /currently (?:open|recruiting|accepting applications)/i.test(lower)
+  )
+  const closedSignal = (
+    /applications? (?:are |is |have )?(?:now )?closed/i.test(lower) ||
+    /(?:vacancy|role|position|opportunity|job) (?:has |is )?(?:now )?closed/i.test(lower) ||
+    /no longer accepting/i.test(lower) ||
+    /deadline (?:has )?passed/i.test(lower) ||
+    /position (?:has been )?filled/i.test(lower)
+  )
+  const titleMatched = roleTitleFound(lower, roleWords)
+  return { has2027, student, openSignal, closedSignal, titleMatched }
+}
+
+// Conservative deterministic classification. OPEN_NOW and CLOSED are the only
+// states we are willing to assert without an AI check; everything else is left
+// unchanged rather than guessed.
+function classifyDeterministic(signals) {
+  const { has2027, student, openSignal, closedSignal, titleMatched } = signals
+  if (has2027 && student && titleMatched && openSignal && !closedSignal) {
+    return { status: 'OPEN_NOW', confidence: 0.9, mappedApplicationStatus: 'Open Now' }
+  }
+  if (has2027 && student && titleMatched && closedSignal && !openSignal) {
+    return { status: 'CLOSED', confidence: 0.9, mappedApplicationStatus: 'Closed' }
+  }
+  return { status: 'UNKNOWN', confidence: 0, mappedApplicationStatus: null }
+}
+
+function deterministicEvidence(signals, mapped, pages) {
+  return [
+    'Deterministic verification ' + TODAY + ': ' + (mapped || 'no status change') + '.',
+    '2027 mentioned: ' + (signals.has2027 ? 'yes' : 'no') +
+      '; student terms: ' + (signals.student ? 'yes' : 'no') +
+      '; exact role matched: ' + (signals.titleMatched ? 'yes' : 'no') +
+      '; open signal: ' + (signals.openSignal ? 'yes' : 'no') +
+      '; closed signal: ' + (signals.closedSignal ? 'yes' : 'no') + '.',
+    'Checked URLs:\n' + pages.map(page => '- ' + page.url).join('\n')
+  ].join('\n').slice(0, 4000)
+}
+
+async function verifyDeterministic(role) {
+  const roleWords = roleTitleWords(role.specific_role)
+  const urls = [role.application_link, role.careers_page, role.source_url]
+    .map(normaliseUrl)
+    .filter(Boolean)
+
+  // Deduplicate while preserving order.
+  const uniqueUrls = []
+  const seen = new Set()
+  for (const url of urls) {
+    if (!seen.has(url)) { seen.add(url); uniqueUrls.push(url) }
+  }
+
+  if (!uniqueUrls.length) {
+    return {
+      ok: false,
+      mode: 'deterministic',
+      error: 'No fetchable URLs for this role'
+    }
+  }
+
+  const checked = []
+  let best = null
+  let lastSignals = null
+
+  for (const url of uniqueUrls.slice(0, DET_MAX_PAGES)) {
+    const page = await fetchPage(url)
+    if (!page) {
+      checked.push({ url, error: 'unreachable' })
+      continue
+    }
+    checked.push({ url: page.url, text: page.text })
+
+    const signals = detectSignals(page.text, roleWords)
+    lastSignals = signals
+    const classification = classifyDeterministic(signals)
+
+    // Prefer a decisive OPEN_NOW/CLOSED result; keep checking only until we find one.
+    if (classification.mappedApplicationStatus) {
+      best = { page, signals, classification }
+      break
+    }
+  }
+
+  const signals = best ? best.signals : (lastSignals ?? {
+    has2027: false, student: false, openSignal: false, closedSignal: false, titleMatched: false
+  })
+  const classification = best ? best.classification : { status: 'UNKNOWN', confidence: 0, mappedApplicationStatus: null }
+  const pages = checked.filter(page => page.text).map(page => ({ url: page.url }))
+
+  const result = {
+    status: classification.status,
+    confidence: classification.confidence,
+    intake_year: signals.has2027 ? '2027' : '',
+    intake_year_confirmed: signals.has2027,
+    exact_student_program_found: signals.student,
+    exact_role_found: signals.titleMatched,
+    direct_application_for_exact_role_found: signals.openSignal && signals.titleMatched,
+    official_program_source_found: true,
+    opening_date: '',
+    opening_timing: '',
+    deadline: '',
+    deadline_type: '',
+    verified_application_url: '',
+    location_city: '',
+    location_country: '',
+    salary: '',
+    degree_requirements: '',
+    placement_duration: '',
+    placement_type: '',
+    website: '',
+    evidence_summary: 'Deterministic check. ' + (classification.mappedApplicationStatus
+      ? 'Strong ' + classification.mappedApplicationStatus.toLowerCase() + ' signal found.'
+      : 'No strong open/closed signal found; leaving status unchanged.'),
+    sources: pages.map(page => ({ url: page.url, type: 'page', evidence: 'Deterministic check' })),
+    mappedApplicationStatus: classification.mappedApplicationStatus,
+    evidence: deterministicEvidence(signals, classification.mappedApplicationStatus, pages)
+  }
+
+  return { ok: true, mode: 'deterministic', result }
+}
+
+// ---------------------------------------------------------------------------
+// AI (opt-in) verification
+// ---------------------------------------------------------------------------
 
 const MAX_WEB_SEARCHES = 10
 const MAX_OUTPUT_TOKENS = 2400
 const REQUEST_TIMEOUT_MS = 120000
 
-// Availability state machine. The app's application_status only accepts:
-// 'Open Now' | 'Opening Soon' | 'Expected' | 'Not Yet Published' | 'Closed'.
-// The verifier can also return UNKNOWN, which means "leave the existing value alone".
 const schema = {
   type: 'object',
   additionalProperties: false,
@@ -90,7 +297,6 @@ const schema = {
   ]
 }
 
-// Ordinary quoted strings joined together (no backticks inside the prompt).
 const instructions = [
   'You are the high-precision verification agent for an engineering student placement tracker.',
   'The tracker ONLY cares about placements that START IN 2027 (a 2027 intake). Do not reclassify a role based on a 2026 or earlier intake.',
@@ -123,11 +329,6 @@ const instructions = [
   '',
   'Return only the structured result.'
 ].join('\n')
-
-function normaliseUrl(value) {
-  if (!value) return null
-  try { return new URL(value).toString() } catch { return null }
-}
 
 function knownLinks(role) {
   return [role.application_link, role.careers_page, role.source_url]
@@ -219,10 +420,7 @@ function intakeIs2027(intakeYear) {
   return /\b2027\b/.test(String(intakeYear ?? ''))
 }
 
-// Map a verified result to one of the app's 5 statuses, or null to leave the
-// existing value untouched. Every mapping requires the student programme to be
-// established so a non-student/expired result can never flip a card.
-export function mapToApplicationStatus(result) {
+function mapToApplicationStatus(result) {
   if (!result || result.exact_student_program_found !== true) return null
 
   const confidence = result.confidence
@@ -252,14 +450,10 @@ export function mapToApplicationStatus(result) {
       return null
 
     case 'NOT_YET_PUBLISHED':
-      // A known student programme whose 2027 intake is not yet published, OR a
-      // closed 2026 intake with no 2027 intake published yet. When the 2027 intake
-      // IS confirmed but opening details are missing, that is "Expected".
       if (confidence >= 0.65) return intake2027 ? 'Expected' : 'Not Yet Published'
       return null
 
     case 'CLOSED':
-      // Only close the card when the 2027 intake itself is confirmed and closed.
       if (confidence >= 0.88 && intake2027) return 'Closed'
       return null
 
@@ -284,12 +478,15 @@ function evidenceText(result) {
   return parts.join('\n').slice(0, 4000)
 }
 
-// Public entry point. Returns { ok: true, result } on success or { ok: false, error }.
-export async function verifyPlacement(role) {
+async function verifyWithAi(role) {
+  if (!openAiKey) {
+    return { ok: false, mode: 'ai', error: 'USE_OPENAI=true but OPENAI_API_KEY is missing' }
+  }
   try {
     const result = await ask(role)
     return {
       ok: true,
+      mode: 'ai',
       result: {
         ...result,
         mappedApplicationStatus: mapToApplicationStatus(result),
@@ -297,8 +494,13 @@ export async function verifyPlacement(role) {
       }
     }
   } catch (error) {
-    return { ok: false, error: error?.message ?? String(error) }
+    return { ok: false, mode: 'ai', error: error?.message ?? String(error) }
   }
 }
 
-export { TODAY, TARGET_INTAKE, model }
+// Public entry point. Returns { ok, mode, result? , error? }.
+export async function verifyPlacement(role) {
+  return useOpenAi ? verifyWithAi(role) : verifyDeterministic(role)
+}
+
+export { TODAY, TARGET_INTAKE, model, useOpenAi }
