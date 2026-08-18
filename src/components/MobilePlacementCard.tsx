@@ -22,7 +22,8 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const appStage = p.app_status && p.app_status !== 'Not Applied' ? p.app_status : null
   const status = p.application_status ?? 'TBC'
   const cardRef = useRef<HTMLButtonElement>(null)
-  const touchStart = useRef<{ x: number; y: number } | null>(null)
+  const pointerStart = useRef<{ x: number; y: number } | null>(null)
+  const activePointerId = useRef<number | null>(null)
   const gestureAxis = useRef<'horizontal' | 'vertical' | null>(null)
   const swipeX = useRef(0)
   const didSwipe = useRef(false)
@@ -110,7 +111,8 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
 
   const finishSwipe = () => {
     const dx = swipeX.current
-    touchStart.current = null
+    pointerStart.current = null
+    activePointerId.current = null
     gestureAxis.current = null
     hapticTriggered.current = false
     setSwipeSide(null)
@@ -122,7 +124,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       return
     }
 
-    // Keep the card straight and give the release a short, natural settle.
+    // Keep the card perfectly straight and give the release a short, natural settle.
     applySwipeVisual(dx > 0 ? 18 : -18, true)
     resetTimer.current = window.setTimeout(() => {
       resetSwipeVisual()
@@ -133,30 +135,41 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     window.setTimeout(() => { didSwipe.current = false }, SWIPE_SNAP_DURATION)
   }
 
-  const handleTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
-    if (swipeBusy.current) return
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (swipeBusy.current || activePointerId.current !== null) return
+
     if (resetTimer.current !== null) {
       window.clearTimeout(resetTimer.current)
       resetTimer.current = null
     }
-    const touch = e.touches[0]
-    touchStart.current = { x: touch.clientX, y: touch.clientY }
+
+    activePointerId.current = e.pointerId
+    pointerStart.current = { x: e.clientX, y: e.clientY }
     gestureAxis.current = null
     swipeX.current = 0
     didSwipe.current = false
     hapticTriggered.current = false
     setSwipeSide(null)
+
+    // Pointer capture is important here: once the card moves under the finger,
+    // the card still receives every subsequent pointer event.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // Pointer capture is an enhancement; the gesture can still continue without it.
+    }
+
     cardRef.current?.classList.add('is-dragging')
   }
 
-  const handleTouchMove = (e: React.TouchEvent<HTMLButtonElement>) => {
-    if (!touchStart.current || swipeBusy.current) return
-    const touch = e.touches[0]
-    const dx = touch.clientX - touchStart.current.x
-    const dy = touch.clientY - touchStart.current.y
+  const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!pointerStart.current || activePointerId.current !== e.pointerId || swipeBusy.current) return
 
-    // Lock the gesture to the first meaningful direction. This prevents the browser's
-    // scrolling/click handling from fighting the horizontal card drag.
+    const dx = e.clientX - pointerStart.current.x
+    const dy = e.clientY - pointerStart.current.y
+
+    // Only decide the gesture direction once. Once horizontal, keep following the
+    // finger even when it reverses direction through the centre of the card.
     if (gestureAxis.current === null) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) < DIRECTION_LOCK_DISTANCE) return
       gestureAxis.current = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
@@ -165,7 +178,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     if (gestureAxis.current === 'vertical') return
 
     e.preventDefault()
-    e.stopPropagation()
     didSwipe.current = true
 
     if (Math.abs(dx) >= 35) {
@@ -183,14 +195,33 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     applySwipeVisual(dx)
   }
 
-  const handleTouchEnd = () => {
-    if (!touchStart.current) return
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (activePointerId.current !== e.pointerId || !pointerStart.current) return
+
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      // Ignore browsers without pointer capture support.
+    }
+
     finishSwipe()
   }
 
-  const handleTouchCancel = () => {
-    if (!touchStart.current) return
-    touchStart.current = null
+  const handlePointerCancel = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (activePointerId.current !== e.pointerId || !pointerStart.current) return
+
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      // Ignore browsers without pointer capture support.
+    }
+
+    pointerStart.current = null
+    activePointerId.current = null
     gestureAxis.current = null
     hapticTriggered.current = false
     setSwipeSide(null)
@@ -219,10 +250,10 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       ref={cardRef}
       className="mobile-placement-card"
       onClick={handleClick}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onTouchCancel={handleTouchCancel}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
       aria-label={`Open ${p.company} placement details`}
     >
       {swipeLabel && <span className={`mpc-swipe-label ${swipeSide === 'left' ? 'left' : 'right'}`}>{swipeLabel}</span>}
