@@ -14,6 +14,7 @@ interface Props {
 const SWIPE_THRESHOLD = 80
 const MAX_SWIPE = 120
 const SWIPE_SNAP_DURATION = 180
+const DIRECTION_LOCK_DISTANCE = 8
 
 export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft, onSwipeRight }: Props) {
   const priority = (p.overall_priority ?? 'LOW_PRIORITY') as OverallPriority
@@ -22,6 +23,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const status = p.application_status ?? 'TBC'
   const cardRef = useRef<HTMLButtonElement>(null)
   const touchStart = useRef<{ x: number; y: number } | null>(null)
+  const gestureAxis = useRef<'horizontal' | 'vertical' | null>(null)
   const swipeX = useRef(0)
   const didSwipe = useRef(false)
   const hapticTriggered = useRef(false)
@@ -43,14 +45,8 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     swipeX.current = clamped
     card.classList.toggle('is-dragging', !animate)
 
-    const update = () => {
-      const rotation = Math.max(-4, Math.min(4, clamped * 0.028))
-      const scale = 1 - Math.min(Math.abs(clamped) / MAX_SWIPE, 1) * 0.012
-      card.style.transform = `translate3d(${clamped}px, 0, 0) rotate(${rotation}deg) scale(${scale})`
-    }
-
     animationFrame.current = requestAnimationFrame(() => {
-      update()
+      card.style.transform = `translate3d(${clamped}px, 0, 0)`
       animationFrame.current = null
     })
   }
@@ -59,13 +55,11 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const card = cardRef.current
     if (!card) return
     card.classList.remove('is-dragging')
-    card.style.transform = 'translate3d(0, 0, 0) rotate(0deg) scale(1)'
+    card.style.transform = 'translate3d(0, 0, 0)'
     swipeX.current = 0
   }
 
   const triggerClick = () => {
-    // Simulate a native tactile click with a very short, quiet Web Audio transient.
-    // This runs from a touch gesture, so mobile browsers are allowed to start the audio context.
     try {
       const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       if (!AudioContextClass) return
@@ -85,7 +79,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       oscillator.stop(now + 0.03)
       window.setTimeout(() => void context.close(), 100)
     } catch {
-      // Haptic/audio feedback is optional; never let it interfere with the swipe.
+      // Optional feedback must never interfere with the gesture.
     }
   }
 
@@ -117,6 +111,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const finishSwipe = () => {
     const dx = swipeX.current
     touchStart.current = null
+    gestureAxis.current = null
     hapticTriggered.current = false
     setSwipeSide(null)
 
@@ -127,7 +122,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       return
     }
 
-    // Give the release a short native-style spring-back instead of snapping immediately.
+    // Keep the card straight and give the release a short, natural settle.
     applySwipeVisual(dx > 0 ? 18 : -18, true)
     resetTimer.current = window.setTimeout(() => {
       resetSwipeVisual()
@@ -146,6 +141,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     }
     const touch = e.touches[0]
     touchStart.current = { x: touch.clientX, y: touch.clientY }
+    gestureAxis.current = null
     swipeX.current = 0
     didSwipe.current = false
     hapticTriggered.current = false
@@ -159,8 +155,16 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const dx = touch.clientX - touchStart.current.x
     const dy = touch.clientY - touchStart.current.y
 
-    // Let normal vertical scrolling continue; only track a clearly horizontal gesture.
-    if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return
+    // Lock the gesture to the first meaningful direction. This prevents the browser's
+    // scrolling/click handling from fighting the horizontal card drag.
+    if (gestureAxis.current === null) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < DIRECTION_LOCK_DISTANCE) return
+      gestureAxis.current = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
+    }
+
+    if (gestureAxis.current === 'vertical') return
+
+    e.preventDefault()
     e.stopPropagation()
     didSwipe.current = true
 
@@ -187,6 +191,7 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   const handleTouchCancel = () => {
     if (!touchStart.current) return
     touchStart.current = null
+    gestureAxis.current = null
     hapticTriggered.current = false
     setSwipeSide(null)
     applySwipeVisual(0, true)
