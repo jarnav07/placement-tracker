@@ -35,26 +35,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Discover new 2027 placements
+      - name: Discover new 2027 placements (deterministic → Azure when needed)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          USE_OPENAI: ${{ vars.USE_OPENAI }}
-          USE_GROQ: ${{ vars.USE_GROQ }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          # Discovery crawls existing tracked career sources only. The shared
+          # verifier gathers deterministic evidence first and escalates to Azure
+          # only when that evidence is ambiguous.
+          USE_GROQ: 'false'
+          USE_AZURE: 'true'
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT_NAME: ${{ secrets.AZURE_OPENAI_DEPLOYMENT_NAME }}
+          AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+          USE_OPENAI: 'false'
         run: npm run discover
 
-      - name: Audit every placement
+      - name: Audit every placement (deterministic → Azure when needed)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          USE_OPENAI: ${{ vars.USE_OPENAI }}
-          USE_GROQ: ${{ vars.USE_GROQ || 'true' }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          # Groq is deliberately disabled. The verifier gathers deterministic
+          # evidence first and Azure is used only for uncertainty/disagreement.
+          USE_GROQ: 'false'
+          USE_AZURE: 'true'
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_DEPLOYMENT_NAME: ${{ secrets.AZURE_OPENAI_DEPLOYMENT_NAME }}
+          AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+          USE_OPENAI: 'false'
         run: npm run audit

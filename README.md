@@ -143,21 +143,24 @@ Database security should be enforced with Supabase Row Level Security (RLS) poli
 
 A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (09:30 and 18:00 UK time) and can also be triggered manually from the Actions tab.
 
-It has three modes:
+Every audit row runs deterministic page/job-board verification first. Azure OpenAI is used only when that evidence is ambiguous or unavailable; Groq and OpenAI are disabled in the maintenance workflow.
 
-- **Deterministic (default — no AI, no API credits).** The **audit** fetches each tracked placement's links and applies conservative 2027 + student + open/closed signal rules. A card only changes when the evidence is explicit; ambiguous roles are left unchanged. The **discovery** step is skipped.
-- **Groq AI audit (free, enabled by default in the workflow).** The workflow defaults `USE_GROQ` to `true`; set the repository variable to `false` to fall back to deterministic. Requires the free `GROQ_API_KEY` (no card). The audit fetches each tracked page and sends the text to a free Llama model for classification — better recall than deterministic mode at zero cost. Discovery stays disabled.
-- **OpenAI AI (opt-in).** Set `USE_OPENAI=true` + `OPENAI_API_KEY` for web-research-backed discovery and the most thorough verification.
+- **Deterministic first (no AI credits).** The audit fetches tracked links, follows "Apply" buttons to external job boards (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), and applies conservative evidence-gated rules.
+- **Azure OpenAI escalation.** The workflow sets `USE_AZURE=true` and provides the Azure deployment only for uncertain deterministic results. Use a deployment such as `gpt-4.1-mini` from Azure AI Foundry.
+- **Deterministic discovery.** The discovery step crawls official career/source pages already present in the tracker, extracts explicit student-role links, and verifies each candidate with deterministic evidence first and Azure only when needed. It does not use web-search AI or Groq.
+- **Final fallback.** If Azure is unavailable or fails, the best safe deterministic result is retained; rows are never deleted or guessed.
+- **Optional providers.** The scripts still support Groq/OpenAI for manual experiments, but the scheduled maintenance workflow explicitly disables them.
 
 Each run:
 
-1. **Discover** (`npm run discover`, `scripts/placement-discovery.mjs`) — in AI-assisted mode this searches for new **2027-start** student placements in aerospace, space, rockets, satellites, motorsport and general engineering, verifies each candidate's programme, exact role, intake and opening status, and inserts only confirmed valid entries. It is skipped in deterministic mode to save credits.
+1. **Discover** (`npm run discover`, `scripts/placement-discovery.mjs`) — deterministically crawls official career/source pages already tracked, extracts explicit student-role links, verifies candidates for the **2027-start** intake, and inserts only confirmed valid entries. Azure is used only when deterministic evidence is insufficient.
 2. **Audit** (`npm run audit`, `scripts/placement-audit.mjs`) — re-verifies **every** placement row and updates `application_status` (and, when verified, opening date, deadline and link) so cards reflect the latest availability.
 
 ### Verification safety rules
 
 - Only placements that **start in 2027** are tracked. A closed **2026** intake is never treated as a closed **2027** intake.
 - A role is only added or flipped to **Open Now** when the exact student role and the 2027 intake are verified. In deterministic mode this means strong, explicit page signals (2027 + student terms + the exact role + an apply/open signal).
+- **Job-board verification.** When a tracked page's "Apply" button points to an external job board (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), the audit follows it and queries the board's public API. If the **exact tracked role appears among the live postings** it is flipped to **Open Now** (and the direct posting URL replaces the generic link). If the board is queried successfully and the role is absent — even loosely — a card currently marked **Open Now** is moved to **Closed**; otherwise the status is left unchanged. Boards that cannot be queried reliably are ignored (no assertion).
 - Unverifiable roles are left unchanged or marked **Not Yet Published** / **Expected** rather than guessed (AI mode).
 - The audit **never deletes rows** and **never touches** your application-tracking fields (`app_status`, dates, CV version, referral, interview, outcome, notes, Not Interested).
 
@@ -167,12 +170,17 @@ Each run:
 | --- | --- |
 | `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
-| `GROQ_API_KEY` (optional, free) | Enables the free Groq AI audit when `USE_GROQ=true` |
-| `USE_GROQ` (repository variable, optional) | Defaults to `true` in the workflow; set to `false` to disable the free Groq AI audit |
+| `AZURE_OPENAI_API_KEY` (required for scheduled AI escalation) | Azure OpenAI API key — enables Azure escalation for uncertain deterministic results |
+| `AZURE_OPENAI_ENDPOINT` (optional) | Azure OpenAI endpoint, e.g. `https://your-resource.openai.azure.com` |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` (optional) | Your Azure deployment name, e.g. `gpt-4.1-mini` |
+| `AZURE_OPENAI_API_VERSION` (optional) | API version, defaults to `2025-08-01-preview` |
+| `USE_AZURE` (repository variable, optional) | Defaults to `true` in the workflow; set to `false` to disable the Azure AI audit |
+| `GROQ_API_KEY` (not used by scheduled workflow) | Only needed for optional manual Groq experiments |
+| `USE_GROQ` (not used by scheduled workflow) | The maintenance workflow sets this to `false` directly |
 | `OPENAI_API_KEY` (optional) | Only needed when `USE_OPENAI=true` (AI discovery) |
-| `USE_OPENAI` (repository variable, optional) | Set to `true` to enable OpenAI discovery + verification |
+| `USE_OPENAI` (not used by scheduled workflow) | The maintenance workflow sets this to `false` directly |
 
-Optional models: `GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`), `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
+Optional models: `GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`), `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, `AZURE_OPENAI_API_KEY`, or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
 
 ### Recommended one-time setup: automated backups
 

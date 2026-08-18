@@ -10,7 +10,7 @@
 //   - source_date_checked / source_verified (verification trail)
 
 import { createClient } from '@supabase/supabase-js'
-import { verifyPlacement, TODAY, useGroq, useOpenAi } from './placement-verifier.mjs'
+import { verifyPlacement, TODAY, useAzure, useOpenAi } from './placement-verifier.mjs'
 
 const rawSupabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '')
   .trim().replace(/^['"]|['"]$/g, '')
@@ -31,9 +31,10 @@ const supabase = createClient(supabaseUrl.toString().replace(/\/$/, ''), supabas
   realtime: { enabled: false }
 })
 
-// Keep API-assisted runs under free-tier request-per-minute limits.
-const MAX_CONCURRENT = (useGroq || useOpenAi) ? 1 : 2
-const DELAY_MS = useGroq ? 2200 : (useOpenAi ? 700 : 350)
+// Keep API-assisted runs under provider rate limits. Azure pay-as-you-go allows
+// fast sequential calls; Groq's free tier needs a slower pace.
+const MAX_CONCURRENT = (useAzure || useOpenAi) ? 1 : 2
+const DELAY_MS = useAzure ? 500 : (useOpenAi ? 700 : 350)
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
