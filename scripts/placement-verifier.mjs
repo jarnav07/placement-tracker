@@ -13,6 +13,9 @@
 const openAiKey = process.env.OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '') || ''
 const model = process.env.OPENAI_MODEL?.trim().replace(/^['"]|['"]$/g, '') || 'gpt-4o-mini'
 const useOpenAi = process.env.USE_OPENAI === 'true'
+const groqApiKey = process.env.GROQ_API_KEY?.trim().replace(/^['"]|['"]$/g, '') || ''
+const groqModel = process.env.GROQ_MODEL?.trim().replace(/^['"]|['"]$/g, '') || 'llama-3.3-70b-versatile'
+const useGroq = process.env.USE_GROQ === 'true'
 
 const TODAY = new Date().toISOString().slice(0, 10)
 const TARGET_INTAKE = '2027'
@@ -219,6 +222,192 @@ async function verifyDeterministic(role) {
   }
 
   return { ok: true, mode: 'deterministic', result }
+}
+
+// ---------------------------------------------------------------------------
+// Groq (free LLM, no web-search tool) verification
+// ---------------------------------------------------------------------------
+
+const GROQ_TIMEOUT_MS = 120000
+const GROQ_MAX_PAGE_CHARS = 5000
+const GROQ_TOTAL_TEXT_CHARS = 14000
+
+const groqInstructions = [
+  'You are a high-precision verification agent for an engineering student placement tracker.',
+  'The tracker ONLY cares about placements that START IN 2027.',
+  'You are given the text of employer pages that were fetched for a specific role. Reason ONLY from the provided text. Do not invent facts, dates, or links, and do not perform any web search.',
+  '',
+  'Decide the availability state of the EXACT student placement / industrial placement / year-in-industry / internship / co-op / undergraduate work placement role described.',
+  '',
+  'States (choose exactly one):',
+  'OPEN_NOW - the exact 2027 student role is currently accepting applications.',
+  'OPENING_SOON - the employer explicitly states when the 2027 intake will open during 2026 (a specific date or month).',
+  'EXPECTED - the employer confirms a 2027 student programme/intake but has not published opening details.',
+  'NOT_YET_PUBLISHED - the employer has a student programme but the 2027 intake/opening is not published, or the intake cannot be established.',
+  'CLOSED - the 2027 tracked intake is itself closed, filled, withdrawn, or expired.',
+  'UNKNOWN - the evidence is insufficient or conflicting.',
+  '',
+  'RULES:',
+  '- A closed 2026 intake does NOT mean the 2027 intake is closed. If only a closed 2026 intake appears and no 2027 intake is published, use NOT_YET_PUBLISHED (or EXPECTED if a 2027/recurring programme is confirmed).',
+  '- Distinguish the application OPENING date from the placement START date. A September 2027 start is not the same as applications opening in September 2026.',
+  '- Student roles only, never graduate schemes or experienced-hire jobs.',
+  '- Verify the EXACT role, not a different role at the same company.',
+  '- A generic Apply/Search link is not proof that the exact role is open.',
+  '- If the text is insufficient, return UNKNOWN rather than guessing.',
+  '',
+  'Output a single JSON object with exactly these keys. Use an empty string for unknown string fields:',
+  'status (one of the states above),',
+  'confidence (number 0 to 1),',
+  'intake_year (string, e.g. "2027" or ""),',
+  'intake_year_confirmed (boolean),',
+  'exact_student_program_found (boolean),',
+  'exact_role_found (boolean),',
+  'direct_application_for_exact_role_found (boolean),',
+  'official_program_source_found (boolean),',
+  'opening_date (string or ""),',
+  'opening_timing (string or ""),',
+  'deadline (string or ""),',
+  'deadline_type (string or ""),',
+  'evidence_summary (string).'
+].join('\n')
+
+async function fetchRolePages(role) {
+  const urls = [role.application_link, role.careers_page, role.source_url]
+    .map(normaliseUrl)
+    .filter(Boolean)
+  const unique = []
+  const seen = new Set()
+  for (const url of urls) {
+    if (!seen.has(url)) { seen.add(url); unique.push(url) }
+  }
+  const pages = []
+  for (const url of unique.slice(0, DET_MAX_PAGES)) {
+    const page = await fetchPage(url)
+    if (page) pages.push(page)
+  }
+  return pages
+}
+
+function groqEvidenceText(result, pages) {
+  const parts = [
+    'Groq verification ' + TODAY + ': ' + result.status + ' (' + Math.round(result.confidence * 100) + '% confidence).',
+    'Student programme: ' + (result.exact_student_program_found ? 'verified' : 'not verified') + '; exact role: ' + (result.exact_role_found ? 'verified' : 'not verified') + '; 2027 intake: ' + (result.intake_year_confirmed ? 'confirmed' : 'not confirmed') + '.',
+    result.evidence_summary || '',
+    'Fetched pages:\n' + pages.map(page => '- ' + page.url).join('\n')
+  ].filter(Boolean)
+  return parts.join('\n').slice(0, 4000)
+}
+
+function normalizeGroqResult(raw, pages) {
+  const validStatuses = ['OPEN_NOW', 'OPENING_SOON', 'EXPECTED', 'NOT_YET_PUBLISHED', 'CLOSED', 'UNKNOWN']
+  const status = validStatuses.includes(raw?.status) ? raw.status : 'UNKNOWN'
+  const confidence = Number.isFinite(Number(raw?.confidence)) ? Math.max(0, Math.min(1, Number(raw.confidence))) : 0
+  const bool = value => value === true || value === 'true' || value === 1 || value === '1'
+  const str = value => (typeof value === 'string' ? value : '')
+  const dateLike = value => /\b(20\d\d|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*)\b/i.test(value)
+
+  const opening_date = dateLike(str(raw?.opening_date)) ? str(raw.opening_date) : ''
+  const deadline = dateLike(str(raw?.deadline)) ? str(raw.deadline) : ''
+  const deadline_type = ['Rolling', 'Fixed', 'TBC'].includes(str(raw?.deadline_type)) ? str(raw.deadline_type) : ''
+
+  const result = {
+    status,
+    confidence,
+    intake_year: str(raw?.intake_year),
+    intake_year_confirmed: bool(raw?.intake_year_confirmed),
+    exact_student_program_found: bool(raw?.exact_student_program_found),
+    exact_role_found: bool(raw?.exact_role_found),
+    direct_application_for_exact_role_found: bool(raw?.direct_application_for_exact_role_found),
+    official_program_source_found: bool(raw?.official_program_source_found),
+    opening_date,
+    opening_timing: str(raw?.opening_timing),
+    deadline,
+    deadline_type,
+    verified_application_url: '',
+    location_city: '',
+    location_country: '',
+    salary: '',
+    degree_requirements: '',
+    placement_duration: '',
+    placement_type: '',
+    website: '',
+    evidence_summary: str(raw?.evidence_summary),
+    sources: pages.map(page => ({ url: page.url, type: 'page', evidence: 'Fetched page provided to Groq' }))
+  }
+
+  result.mappedApplicationStatus = mapToApplicationStatus(result)
+  result.evidence = groqEvidenceText(result, pages)
+  return result
+}
+
+async function verifyWithGroq(role) {
+  if (!groqApiKey) {
+    return { ok: false, mode: 'groq', error: 'USE_GROQ=true but GROQ_API_KEY is missing' }
+  }
+
+  const pages = await fetchRolePages(role)
+  if (!pages.length) {
+    return { ok: false, mode: 'groq', error: 'No fetchable pages for this role' }
+  }
+
+  const pageText = pages
+    .map(page => '### ' + page.url + '\n' + page.text.slice(0, GROQ_MAX_PAGE_CHARS))
+    .join('\n\n')
+    .slice(0, GROQ_TOTAL_TEXT_CHARS)
+
+  const userPrompt = [
+    'Current date: ' + TODAY,
+    'Target placement start intake: 2027',
+    '',
+    'Company: ' + (role.company ?? ''),
+    'Role: ' + (role.specific_role ?? ''),
+    'Location: ' + [role.city, role.country].filter(Boolean).join(', '),
+    'Engineering area: ' + (role.engineering_area ?? role.department ?? ''),
+    'Currently recorded application status: ' + (role.application_status ?? ''),
+    '',
+    'Fetched page text (reason ONLY from this):',
+    pageText
+  ].join('\n')
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS)
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + groqApiKey
+      },
+      body: JSON.stringify({
+        model: groqModel,
+        temperature: 0,
+        max_tokens: 700,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: groqInstructions },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    })
+
+    const body = await response.json()
+    if (!response.ok) {
+      throw new Error(body?.error?.message || ('Groq HTTP ' + response.status))
+    }
+    const content = body?.choices?.[0]?.message?.content
+    if (!content) throw new Error('Groq returned no content')
+
+    let raw
+    try { raw = JSON.parse(content) } catch { throw new Error('Groq returned invalid JSON') }
+
+    const result = normalizeGroqResult(raw, pages)
+    return { ok: true, mode: 'groq', result }
+  } catch (error) {
+    return { ok: false, mode: 'groq', error: error?.message ?? String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +689,9 @@ async function verifyWithAi(role) {
 
 // Public entry point. Returns { ok, mode, result? , error? }.
 export async function verifyPlacement(role) {
-  return useOpenAi ? verifyWithAi(role) : verifyDeterministic(role)
+  if (useGroq) return verifyWithGroq(role)
+  if (useOpenAi) return verifyWithAi(role)
+  return verifyDeterministic(role)
 }
 
-export { TODAY, TARGET_INTAKE, model, useOpenAi }
+export { TODAY, TARGET_INTAKE, model, useOpenAi, useGroq, groqModel }

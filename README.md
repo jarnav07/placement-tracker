@@ -143,10 +143,11 @@ Database security should be enforced with Supabase Row Level Security (RLS) poli
 
 A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (04:00 and 16:00 UTC) and can also be triggered manually from the Actions tab.
 
-It has two modes:
+It has three modes:
 
 - **Deterministic (default — no AI, no API credits).** The **audit** fetches each tracked placement's links and applies conservative 2027 + student + open/closed signal rules. A card only changes when the evidence is explicit; ambiguous roles are left unchanged. The **discovery** step is skipped.
-- **AI-assisted (opt-in).** Set the `USE_OPENAI` repository variable to `true` (and add `OPENAI_API_KEY`) to enable AI web research for discovery and more thorough verification.
+- **Groq AI audit (free).** Set the `USE_GROQ` repository variable to `true` and add the free `GROQ_API_KEY` (no card required). The audit fetches each tracked page and sends the text to a free Llama model for classification — better recall than deterministic mode at zero cost. Discovery stays disabled.
+- **OpenAI AI (opt-in).** Set `USE_OPENAI=true` + `OPENAI_API_KEY` for web-research-backed discovery and the most thorough verification.
 
 Each run:
 
@@ -166,10 +167,12 @@ Each run:
 | --- | --- |
 | `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
-| `OPENAI_API_KEY` (optional) | Only needed when `USE_OPENAI=true` |
-| `USE_OPENAI` (repository variable, optional) | Set to `true` to enable AI-assisted discovery + verification |
+| `GROQ_API_KEY` (optional, free) | Enables the free Groq AI audit when `USE_GROQ=true` |
+| `USE_GROQ` (repository variable, optional) | Set to `true` for the free Groq AI audit |
+| `OPENAI_API_KEY` (optional) | Only needed when `USE_OPENAI=true` (AI discovery) |
+| `USE_OPENAI` (repository variable, optional) | Set to `true` to enable OpenAI discovery + verification |
 
-Optional: `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY` or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
+Optional models: `GROQ_MODEL` (defaults to `llama-3.3-70b-versatile`), `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
 
 ### Recommended one-time setup: automated backups
 
