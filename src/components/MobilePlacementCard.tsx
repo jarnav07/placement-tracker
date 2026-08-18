@@ -61,6 +61,18 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   }
 
   const triggerClick = () => {
+    // Use the platform haptic API where it exists (e.g. Android Chrome).
+    // iOS Safari/PWA does not expose a web haptic API, so the audio transient
+    // below provides a subtle fallback. A true iOS Taptic Engine response
+    // requires a native wrapper/bridge such as Capacitor.
+    try {
+      if ('vibrate' in navigator) {
+        navigator.vibrate(10)
+      }
+    } catch {
+      // Haptic feedback is optional.
+    }
+
     try {
       const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       if (!AudioContextClass) return
@@ -124,7 +136,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
       return
     }
 
-    // Keep the card perfectly straight and give the release a short, natural settle.
     applySwipeVisual(dx > 0 ? 18 : -18, true)
     resetTimer.current = window.setTimeout(() => {
       resetSwipeVisual()
@@ -151,8 +162,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     hapticTriggered.current = false
     setSwipeSide(null)
 
-    // Pointer capture is important here: once the card moves under the finger,
-    // the card still receives every subsequent pointer event.
     try {
       e.currentTarget.setPointerCapture(e.pointerId)
     } catch {
@@ -168,8 +177,6 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     const dx = e.clientX - pointerStart.current.x
     const dy = e.clientY - pointerStart.current.y
 
-    // Only decide the gesture direction once. Once horizontal, keep following the
-    // finger even when it reverses direction through the centre of the card.
     if (gestureAxis.current === null) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) < DIRECTION_LOCK_DISTANCE) return
       gestureAxis.current = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
