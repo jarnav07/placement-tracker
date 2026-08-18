@@ -139,15 +139,39 @@ The database stores placement information and application-tracking fields, inclu
 
 Database security should be enforced with Supabase Row Level Security (RLS) policies appropriate to the deployment.
 
-## Automated monitoring
+## Automated maintenance (discovery + audit)
 
-The repository contains Node.js scripts for maintaining placement data. The main monitoring command is:
+A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (04:00 and 16:00 UTC) and can also be triggered manually from the Actions tab.
 
-```bash
-npm run monitor
-```
+Each run does two things, in order:
 
-The monitoring workflow should use protected GitHub Actions secrets for privileged Supabase access. **Do not put `SUPABASE_SERVICE_ROLE_KEY` into the frontend or any `VITE_*` variable.**
+1. **Discover** (`npm run discover`, `scripts/placement-discovery.mjs`) — searches for new **2027-start** student placements in aerospace, space, rockets, satellites, motorsport and general engineering, verifies each candidate's programme, exact role, intake and opening status, and inserts only confirmed valid entries.
+2. **Audit** (`npm run audit`, `scripts/placement-audit.mjs`) — re-verifies **every** placement row and updates `application_status` (and, when verified, opening date, deadline and link) so cards reflect the latest availability.
+
+### Verification safety rules
+
+- Only placements that **start in 2027** are tracked. A closed **2026** intake is never treated as a closed **2027** intake.
+- A role is only added or flipped to **Open Now** when the exact student role, the 2027 intake and a direct application entry are all verified on official employer sources.
+- Unverifiable roles are left unchanged or marked **Not Yet Published** / **Expected** rather than guessed.
+- The audit **never deletes rows** and **never touches** your application-tracking fields (`app_status`, dates, CV version, referral, interview, outcome, notes, Not Interested).
+
+### Required GitHub Actions secrets
+
+| Secret | Purpose |
+| --- | --- |
+| `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
+| `OPENAI_API_KEY` | Powers web research and rigorous verification |
+
+Optional: `OPENAI_MODEL` (defaults to `gpt-4o-mini`). **Do not put `SUPABASE_SERVICE_ROLE_KEY` or `OPENAI_API_KEY` into the frontend or any `VITE_*` variable.**
+
+### Recommended one-time setup: automated backups
+
+Before each audit the script calls a backup function if it exists. Apply `supabase/migrations/20260818000000_create_placements_backup.sql` in the Supabase SQL editor once to enable automatic point-in-time backups (`placements_backup_YYYY_MM_DD_HH24_MI_SS`).
+
+### Legacy scripts
+
+`npm run monitor` (`scripts/role-monitor.mjs`) remains a read-only link-reachability check. The older `job-discovery.mjs`, `gradcracker-discovery.mjs`, `reliable-role-verification.mjs` and `ai-role-status.mjs` scripts are superseded by the new pipeline and are not used by the workflow.
 
 ## GitHub Pages deployment
 
@@ -207,7 +231,9 @@ When changing the UI, preserve the shared application logic and Supabase data mo
 | `npm run dev` | Start the Vite development server |
 | `npm run build` | Type-check and create the production build |
 | `npm run preview` | Preview the production build locally |
-| `npm run monitor` | Run the placement monitoring script |
+| `npm run monitor` | Run the read-only placement link monitor |
+| `npm run discover` | Discover and verify new 2027 student placements |
+| `npm run audit` | Re-verify every placement and update availability |
 | `npm run verify-tracking-features` | Verify protected application/location tracking functionality |
 
 ## Contributing
