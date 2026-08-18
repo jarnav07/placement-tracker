@@ -146,7 +146,7 @@ A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs *
 It has three modes:
 
 - **Deterministic (default — no AI, no API credits).** The **audit** fetches each tracked placement's links and applies conservative 2027 + student + open/closed signal rules. A card only changes when the evidence is explicit; ambiguous roles are left unchanged. The **discovery** step is skipped.
-- **Groq AI audit (free).** Set the `USE_GROQ` repository variable to `true` and add the free `GROQ_API_KEY` (no card required). The audit fetches each tracked page and sends the text to a free Llama model for classification — better recall than deterministic mode at zero cost. Discovery stays disabled.
+- **Groq AI audit (free, enabled by default in the workflow).** The workflow defaults `USE_GROQ` to `true`; set the repository variable to `false` to fall back to deterministic. Requires the free `GROQ_API_KEY` (no card). The audit fetches each tracked page and sends the text to a free Llama model for classification — better recall than deterministic mode at zero cost. Discovery stays disabled.
 - **OpenAI AI (opt-in).** Set `USE_OPENAI=true` + `OPENAI_API_KEY` for web-research-backed discovery and the most thorough verification.
 
 Each run:
@@ -168,7 +168,7 @@ Each run:
 | `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
 | `GROQ_API_KEY` (optional, free) | Enables the free Groq AI audit when `USE_GROQ=true` |
-| `USE_GROQ` (repository variable, optional) | Set to `true` for the free Groq AI audit |
+| `USE_GROQ` (repository variable, optional) | Defaults to `true` in the workflow; set to `false` to disable the free Groq AI audit |
 | `OPENAI_API_KEY` (optional) | Only needed when `USE_OPENAI=true` (AI discovery) |
 | `USE_OPENAI` (repository variable, optional) | Set to `true` to enable OpenAI discovery + verification |
 
