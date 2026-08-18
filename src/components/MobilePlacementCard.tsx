@@ -13,17 +13,55 @@ interface Props {
 
 const SWIPE_THRESHOLD = 80
 const MAX_SWIPE = 120
+const SWIPE_SNAP_DURATION = 180
 
 export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft, onSwipeRight }: Props) {
   const priority = (p.overall_priority ?? 'LOW_PRIORITY') as OverallPriority
   const priorityLabel = PRIORITY_LABELS[priority]
   const appStage = p.app_status && p.app_status !== 'Not Applied' ? p.app_status : null
   const status = p.application_status ?? 'TBC'
+  const cardRef = useRef<HTMLButtonElement>(null)
   const touchStart = useRef<{ x: number; y: number } | null>(null)
+  const swipeX = useRef(0)
   const didSwipe = useRef(false)
   const hapticTriggered = useRef(false)
-  const [swipeX, setSwipeX] = useState(0)
-  const [swipeBusy, setSwipeBusy] = useState(false)
+  const swipeBusy = useRef(false)
+  const animationFrame = useRef<number | null>(null)
+  const resetTimer = useRef<number | null>(null)
+  const [swipeSide, setSwipeSide] = useState<'left' | 'right' | null>(null)
+
+  const applySwipeVisual = (x: number, animate = false) => {
+    const card = cardRef.current
+    if (!card) return
+
+    if (animationFrame.current !== null) {
+      cancelAnimationFrame(animationFrame.current)
+      animationFrame.current = null
+    }
+
+    const clamped = Math.max(-MAX_SWIPE, Math.min(MAX_SWIPE, x))
+    swipeX.current = clamped
+    card.classList.toggle('is-dragging', !animate)
+
+    const update = () => {
+      const rotation = Math.max(-4, Math.min(4, clamped * 0.028))
+      const scale = 1 - Math.min(Math.abs(clamped) / MAX_SWIPE, 1) * 0.012
+      card.style.transform = `translate3d(${clamped}px, 0, 0) rotate(${rotation}deg) scale(${scale})`
+    }
+
+    animationFrame.current = requestAnimationFrame(() => {
+      update()
+      animationFrame.current = null
+    })
+  }
+
+  const resetSwipeVisual = () => {
+    const card = cardRef.current
+    if (!card) return
+    card.classList.remove('is-dragging')
+    card.style.transform = 'translate3d(0, 0, 0) rotate(0deg) scale(1)'
+    swipeX.current = 0
+  }
 
   const triggerClick = () => {
     // Simulate a native tactile click with a very short, quiet Web Audio transient.
@@ -52,9 +90,9 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
   }
 
   const updateSwipe = async (changes: Partial<Placement>) => {
-    setSwipeBusy(true)
+    swipeBusy.current = true
     const { error } = await supabase.from('placements').update(changes).eq('id', p.id)
-    setSwipeBusy(false)
+    swipeBusy.current = false
     if (error) console.error(`Could not save ${p.company} swipe action:`, error)
   }
 
@@ -76,16 +114,47 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     })
   }
 
+  const finishSwipe = () => {
+    const dx = swipeX.current
+    touchStart.current = null
+    hapticTriggered.current = false
+    setSwipeSide(null)
+
+    if (Math.abs(dx) < SWIPE_THRESHOLD) {
+      applySwipeVisual(0, true)
+      resetTimer.current = window.setTimeout(resetSwipeVisual, SWIPE_SNAP_DURATION)
+      didSwipe.current = false
+      return
+    }
+
+    // Give the release a short native-style spring-back instead of snapping immediately.
+    applySwipeVisual(dx > 0 ? 18 : -18, true)
+    resetTimer.current = window.setTimeout(() => {
+      resetSwipeVisual()
+      if (dx < 0) handleSwipeLeft()
+      else handleSwipeRight()
+    }, SWIPE_SNAP_DURATION)
+
+    window.setTimeout(() => { didSwipe.current = false }, SWIPE_SNAP_DURATION)
+  }
+
   const handleTouchStart = (e: React.TouchEvent<HTMLButtonElement>) => {
-    if (swipeBusy) return
+    if (swipeBusy.current) return
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current)
+      resetTimer.current = null
+    }
     const touch = e.touches[0]
     touchStart.current = { x: touch.clientX, y: touch.clientY }
+    swipeX.current = 0
     didSwipe.current = false
     hapticTriggered.current = false
+    setSwipeSide(null)
+    cardRef.current?.classList.add('is-dragging')
   }
 
   const handleTouchMove = (e: React.TouchEvent<HTMLButtonElement>) => {
-    if (!touchStart.current || swipeBusy) return
+    if (!touchStart.current || swipeBusy.current) return
     const touch = e.touches[0]
     const dx = touch.clientX - touchStart.current.x
     const dy = touch.clientY - touchStart.current.y
@@ -95,31 +164,34 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     e.stopPropagation()
     didSwipe.current = true
 
-    // Give one simulated tactile click when the action threshold is first reached.
+    if (Math.abs(dx) >= 35) {
+      const nextSide = dx < 0 ? 'left' : 'right'
+      setSwipeSide((current) => current === nextSide ? current : nextSide)
+    } else {
+      setSwipeSide(null)
+    }
+
     if (Math.abs(dx) >= SWIPE_THRESHOLD && !hapticTriggered.current) {
       hapticTriggered.current = true
       triggerClick()
     }
 
-    setSwipeX(Math.max(-MAX_SWIPE, Math.min(MAX_SWIPE, dx)))
+    applySwipeVisual(dx)
   }
 
   const handleTouchEnd = () => {
     if (!touchStart.current) return
-    const dx = swipeX
+    finishSwipe()
+  }
+
+  const handleTouchCancel = () => {
+    if (!touchStart.current) return
     touchStart.current = null
-    setSwipeX(0)
     hapticTriggered.current = false
-
-    if (Math.abs(dx) < SWIPE_THRESHOLD) {
-      didSwipe.current = false
-      return
-    }
-
-    if (dx < 0) handleSwipeLeft()
-    else handleSwipeRight()
-
-    window.setTimeout(() => { didSwipe.current = false }, 0)
+    setSwipeSide(null)
+    applySwipeVisual(0, true)
+    resetTimer.current = window.setTimeout(resetSwipeVisual, SWIPE_SNAP_DURATION)
+    didSwipe.current = false
   }
 
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -131,19 +203,24 @@ export default function MobilePlacementCard({ placement: p, onOpen, onSwipeLeft,
     onOpen()
   }
 
-  const swipeLabel = swipeX <= -35 ? (p.not_interested ? 'Back to opportunities' : 'Not interested') : swipeX >= 35 ? (appStage ? 'Unapply' : 'Apply') : null
+  const swipeLabel = swipeSide === 'left'
+    ? (p.not_interested ? 'Back to opportunities' : 'Not interested')
+    : swipeSide === 'right'
+      ? (appStage ? 'Unapply' : 'Apply')
+      : null
 
   return (
     <button
+      ref={cardRef}
       className="mobile-placement-card"
       onClick={handleClick}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
-      style={{ transform: `translateX(${swipeX}px)` }}
+      onTouchCancel={handleTouchCancel}
       aria-label={`Open ${p.company} placement details`}
     >
-      {swipeLabel && <span className={`mpc-swipe-label ${swipeX < 0 ? 'left' : 'right'}`}>{swipeLabel}</span>}
+      {swipeLabel && <span className={`mpc-swipe-label ${swipeSide === 'left' ? 'left' : 'right'}`}>{swipeLabel}</span>}
       <div className="mpc-topline">
         <span className="mpc-company">{p.company}</span>
         <span className="mpc-score" style={{ color: scoreBarColor(p.cv_fit ?? 0) }}>{p.cv_fit ?? '?'}</span>
