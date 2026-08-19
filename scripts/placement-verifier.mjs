@@ -99,7 +99,9 @@ const STOPWORDS = new Set([
 function roleTitleWords(specificRole) {
   return norm(specificRole)
     .split(' ')
-    .filter(word => word.length >= 4 && !STOPWORDS.has(word))
+    // Keep 3-letter technical terms (CFD, GNC, CAD, FEA, …) — they are
+    // decisive for exact-role matching and must not be dropped.
+    .filter(word => word.length >= 3 && !STOPWORDS.has(word))
 }
 
 function roleTitleFound(text, words) {
@@ -109,7 +111,7 @@ function roleTitleFound(text, words) {
   return present.length >= Math.max(2, Math.ceil(words.length * 0.6))
 }
 
-function detectSignals(text, roleWords) {
+function detectSignals(text, roleWords, roleNorm = '') {
   const lower = text.toLowerCase()
   const has2027 = /\b2027\b/.test(lower)
   const student = /industrial placement|year in industry|placement year|sandwich (?:year|placement)|internship|co-?op|undergraduate placement|student placement|12-?month placement/i.test(lower)
@@ -127,19 +129,27 @@ function detectSignals(text, roleWords) {
     /position (?:has been )?filled/i.test(lower)
   )
   const titleMatched = roleTitleFound(lower, roleWords)
-  return { has2027, student, openSignal, closedSignal, titleMatched }
+  // A scattered word match across a whole careers page is not enough to claim
+  // THIS role is open/closed; require the role title to appear as a contiguous
+  // phrase (punctuation-normalised) before any page-text-only assertion.
+  const titleContiguous = roleNorm ? lower.includes(roleNorm) : false
+  return { has2027, student, openSignal, closedSignal, titleMatched, titleContiguous }
 }
 
 // Conservative deterministic classification. OPEN_NOW and CLOSED are the only
 // states we are willing to assert without an AI check; everything else is left
 // unchanged rather than guessed.
 function classifyDeterministic(signals) {
-  const { has2027, student, openSignal, closedSignal, titleMatched } = signals
-  if (has2027 && student && titleMatched && openSignal && !closedSignal) {
-    return { status: 'OPEN_NOW', confidence: 0.9, mappedApplicationStatus: 'Open Now' }
+  const { has2027, student, openSignal, closedSignal, titleMatched, titleContiguous } = signals
+  // Page-text-only path (no queryable board). Require the exact role title to
+  // appear contiguously — a scattered word match across a generic careers page
+  // must NOT flip a card.
+  const exactRole = titleContiguous && titleMatched
+  if (has2027 && student && exactRole && openSignal && !closedSignal) {
+    return { status: 'OPEN_NOW', confidence: 0.85, mappedApplicationStatus: 'Open Now' }
   }
-  if (has2027 && student && titleMatched && closedSignal && !openSignal) {
-    return { status: 'CLOSED', confidence: 0.9, mappedApplicationStatus: 'Closed' }
+  if (has2027 && student && exactRole && closedSignal && !openSignal) {
+    return { status: 'CLOSED', confidence: 0.85, mappedApplicationStatus: 'Closed' }
   }
   return { status: 'UNKNOWN', confidence: 0, mappedApplicationStatus: null }
 }
@@ -151,6 +161,7 @@ function deterministicEvidence(signals, mapped, pages, boardNote) {
     '2027 mentioned: ' + (signals.has2027 ? 'yes' : 'no') +
       '; student terms: ' + (signals.student ? 'yes' : 'no') +
       '; exact role matched: ' + (signals.titleMatched ? 'yes' : 'no') +
+      '; role title contiguous: ' + (signals.titleContiguous ? 'yes' : 'no') +
       '; open signal: ' + (signals.openSignal ? 'yes' : 'no') +
       '; closed signal: ' + (signals.closedSignal ? 'yes' : 'no') + '.',
     'Checked URLs:\n' + pages.map(page => '- ' + page.url).join('\n')
@@ -243,27 +254,36 @@ async function queryBoardJobs(board, pageHtml, boardUrl) {
     case 'greenhouse': {
       const data = await getJson('https://boards-api.greenhouse.io/v1/boards/' + encodeURIComponent(board.key) + '/jobs?content=false')
       if (!data?.jobs || !Array.isArray(data.jobs)) return null
-      return data.jobs.map(job => ({
-        title: job.title || '',
-        url: job.absolute_url || '',
-        location: job.location?.name || ''
-      }))
+      return {
+        complete: true,
+        jobs: data.jobs.map(job => ({
+          title: job.title || '',
+          url: job.absolute_url || '',
+          location: job.location?.name || ''
+        }))
+      }
     }
     case 'lever': {
       const data = await getJson('https://api.lever.co/v0/postings/' + encodeURIComponent(board.key) + '?mode=json')
       if (!Array.isArray(data)) return null
-      return data.map(job => ({
-        title: job.text || '',
-        url: job.hostedUrl || '',
-        location: job.categories?.location || ''
-      }))
+      return {
+        complete: true,
+        jobs: data.map(job => ({
+          title: job.text || '',
+          url: job.hostedUrl || '',
+          location: job.categories?.location || ''
+        }))
+      }
     }
     case 'ashby': {
       const data = await getJson('https://api.ashbyhq.com/posting-api/job-board/' + encodeURIComponent(board.key))
       if (!data?.jobs || !Array.isArray(data.jobs)) return null
-      return data.jobs
-        .filter(job => job.isListed !== false)
-        .map(job => ({ title: job.title || '', url: job.jobUrl || '', location: job.location || '' }))
+      return {
+        complete: true,
+        jobs: data.jobs
+          .filter(job => job.isListed !== false)
+          .map(job => ({ title: job.title || '', url: job.jobUrl || '', location: job.location || '' }))
+      }
     }
     case 'smartrecruiters': {
       const idMatch =
@@ -271,7 +291,8 @@ async function queryBoardJobs(board, pageHtml, boardUrl) {
         String(pageHtml || '').match(/"companyId"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/i)
       if (!idMatch) return null
       const jobs = []
-      for (let offset = 0; offset < 200; offset += 100) {
+      let complete = true
+      for (let offset = 0; offset < 300; offset += 100) {
         const data = await getJson('https://api.smartrecruiters.com/v1/companies/' + idMatch[1] + '/postings?limit=100&offset=' + offset)
         if (!data?.content || !Array.isArray(data.content) || !data.content.length) break
         jobs.push(...data.content.map(job => ({
@@ -279,8 +300,10 @@ async function queryBoardJobs(board, pageHtml, boardUrl) {
           url: job.applyUrl || ('https://jobs.smartrecruiters.com/' + encodeURIComponent(board.key) + '/' + job.id),
           location: [job.location?.city, job.location?.country].filter(Boolean).join(', ')
         })))
+        if (data.content.length < 100) { complete = true; break }
+        complete = false
       }
-      return jobs.length ? jobs : null
+      return jobs.length ? { jobs, complete } : null
     }
     case 'workday': {
       let parsed
@@ -315,11 +338,16 @@ async function queryBoardJobs(board, pageHtml, boardUrl) {
         body: JSON.stringify({ appliedFacets: {}, limit: 20, offset: 0, searchText: '' })
       })
       if (!data?.jobPostings || !Array.isArray(data.jobPostings)) return null
-      return data.jobPostings.map(job => ({
-        title: job.title || '',
-        url: origin + (job.externalPath || ''),
-        location: job.locationText || ''
-      }))
+      // Workday is queried with a small page and may be filtered/truncated, so
+      // its absence of a role is never treated as a complete enumeration.
+      return {
+        complete: false,
+        jobs: data.jobPostings.map(job => ({
+          title: job.title || '',
+          url: origin + (job.externalPath || ''),
+          location: job.locationText || ''
+        }))
+      }
     }
     default:
       return null
@@ -331,9 +359,12 @@ async function queryBoardJobs(board, pageHtml, boardUrl) {
 // Presence is only decisive with a `match`; absence is only decisive when there
 // is not even a `loose` match (so a renamed-but-live posting never triggers a
 // false "Closed").
-function findRoleOnBoard(jobs, roleWords) {
+function findRoleOnBoard(jobs, roleWords, roleNorm = '') {
   if (!Array.isArray(jobs) || !jobs.length || !roleWords.length) return { match: null, loose: null }
   const required = roleWords
+  // A single significant token (e.g. "Engineer" left over from a short title)
+  // is too weak for token overlap — require the full normalised title instead.
+  const requireContiguous = required.length < 2 && roleNorm
   const minCount = required.length <= 2 ? required.length : Math.max(2, Math.ceil(required.length * 0.8))
   let best = null
   let loose = null
@@ -343,6 +374,14 @@ function findRoleOnBoard(jobs, roleWords) {
     const present = required.filter(word => titleNorm.includes(word))
     const ratio = present.length / required.length
     const picked = { title: job.title, url: job.url, location: job.location }
+    if (requireContiguous) {
+      if (titleNorm.includes(roleNorm)) {
+        if (!best || present.length > best.present) best = { ...picked, present: present.length }
+      } else if (ratio >= 0.6 && (!loose || present.length > loose.present)) {
+        loose = { ...picked, present: present.length }
+      }
+      continue
+    }
     if (ratio >= 0.8 && present.length >= minCount) {
       if (!best || present.length > best.present) best = { ...picked, present: present.length }
     } else if (ratio >= 0.6 && (!loose || present.length > loose.present)) {
@@ -360,6 +399,7 @@ function findRoleOnBoard(jobs, roleWords) {
 // means no board could be queried (caller falls back to text signals).
 async function resolveJobBoard(role, pages) {
   const roleWords = roleTitleWords(role.specific_role)
+  const roleNorm = norm(role.specific_role)
   if (!roleWords.length) return { ok: false, reason: 'no role tokens' }
 
   const candidates = []
@@ -383,9 +423,11 @@ async function resolveJobBoard(role, pages) {
       const fetched = await fetchHtml(candidate.url)
       pageHtml = fetched?.html ?? ''
     }
-    const jobs = await queryBoardJobs(board, pageHtml, candidate.url)
-    if (!jobs) continue // could not query — fail safe and try the next candidate
-    const found = findRoleOnBoard(jobs, roleWords)
+    const listing = await queryBoardJobs(board, pageHtml, candidate.url)
+    // An empty or unusable board is not evidence of anything — skip it rather
+    // than treating "0 postings" as "role is closed".
+    if (!listing || !Array.isArray(listing.jobs) || !listing.jobs.length) continue
+    const found = findRoleOnBoard(listing.jobs, roleWords, roleNorm)
     return {
       ok: true,
       found: !!found.match,
@@ -393,7 +435,8 @@ async function resolveJobBoard(role, pages) {
       loose: found.loose,
       boardType: board.type,
       boardUrl: candidate.url,
-      liveCount: jobs.length
+      liveCount: listing.jobs.length,
+      complete: listing.complete === true
     }
   }
   return { ok: false, reason: 'no queryable board found' }
@@ -401,6 +444,7 @@ async function resolveJobBoard(role, pages) {
 
 async function verifyDeterministic(role) {
   const roleWords = roleTitleWords(role.specific_role)
+  const roleNorm = norm(role.specific_role)
   const urls = [role.application_link, role.careers_page, role.source_url]
     .map(normaliseUrl)
     .filter(Boolean)
@@ -430,12 +474,12 @@ async function verifyDeterministic(role) {
       continue
     }
     checked.push(page)
-    lastSignals = detectSignals(page.text, roleWords)
+    lastSignals = detectSignals(page.text, roleWords, roleNorm)
   }
 
   const pages = checked.filter(page => page.text)
   const signals = lastSignals ?? {
-    has2027: false, student: false, openSignal: false, closedSignal: false, titleMatched: false
+    has2027: false, student: false, openSignal: false, closedSignal: false, titleMatched: false, titleContiguous: false
   }
 
   // Follow "Apply Now" links to the external job board: presence of the exact
@@ -447,34 +491,49 @@ async function verifyDeterministic(role) {
   let verifiedUrl = ''
   let boardNote = ''
   let studentConfirmed = signals.student
+  let postingSignals = null
 
   if (board.ok && board.found) {
-    const intakeOk = signals.has2027 || /\b2027\b/.test(board.job.title || '') ||
-      ['Open Now', 'Opening Soon', 'Expected'].includes(role.application_status)
-    if (intakeOk) {
-      classification = { status: 'OPEN_NOW', confidence: 0.92, mappedApplicationStatus: 'Open Now' }
+    // A board match alone is not proof the tracked 2027 student intake is
+    // open: confirm the posting's intake year and student status by reading the
+    // posting's own page (never by trusting the previously stored status).
+    const posting = await fetchPage(board.job.url)
+    postingSignals = posting ? detectSignals(posting.text, roleWords, roleNorm) : null
+    const posting2027 = /\b2027\b/.test(board.job.title || '') || (postingSignals?.has2027 === true)
+    const intakeOk = posting2027 || signals.has2027
+    const studentOk = STUDENT_TERM_RE.test(board.job.title || '') ||
+      STUDENT_TERM_RE.test(role.specific_role || '') ||
+      signals.student ||
+      (postingSignals?.student === true)
+    const graduateSignal = /graduate|experienced hire|experienced|professional hire|post-?doc|apprenticeship/i.test(board.job.title || '')
+
+    if (intakeOk && studentOk && !graduateSignal) {
+      classification = { status: 'OPEN_NOW', confidence: 0.9, mappedApplicationStatus: 'Open Now' }
       verifiedUrl = board.job.url
-      studentConfirmed = signals.student || STUDENT_TERM_RE.test(role.specific_role || '')
-      boardNote = 'Exact role found on the official ' + board.boardType + ' job board (' + board.boardUrl + ') as "' + board.job.title + '" among ' + board.liveCount + ' live postings'
+      studentConfirmed = studentOk
+      boardNote = 'Exact role found live on the official ' + board.boardType + ' board (' + board.boardUrl + ') as "' + board.job.title + '", and its posting confirms a 2027 student placement'
     } else {
       classification = { status: 'UNKNOWN', confidence: 0, mappedApplicationStatus: null }
-      boardNote = 'Exact role found on the ' + board.boardType + ' board, but no 2027 intake evidence; leaving status unchanged'
+      boardNote = 'Exact role found on the ' + board.boardType + ' board as "' + board.job.title + '" but its 2027 intake/student status could not be confirmed; leaving status unchanged'
     }
-  } else if (board.ok && !board.found && !board.loose && board.liveCount > 0) {
+  } else if (board.ok && board.complete && !board.found && !board.loose && board.liveCount > 0) {
+    // Only a fully-enumerated board whose previously-open role is absent (with
+    // no loose match) may be treated as evidence of closure. Absence on an
+    // incomplete board is not conclusive and never closes a role.
     if (role.application_status === 'Open Now') {
-      classification = { status: 'CLOSED', confidence: 0.85, mappedApplicationStatus: 'Closed' }
-      boardNote = 'Official ' + board.boardType + ' job board (' + board.boardUrl + ') queried successfully (' + board.liveCount + ' live postings) and the exact tracked role was NOT found — it is no longer accepting applications'
+      classification = { status: 'CLOSED', confidence: 0.8, mappedApplicationStatus: 'Closed' }
+      boardNote = 'Official ' + board.boardType + ' board queried fully (' + board.liveCount + ' live postings) and the exact tracked role is absent — it is no longer accepting applications'
     } else {
       classification = { status: 'UNKNOWN', confidence: 0, mappedApplicationStatus: null }
-      boardNote = 'Official ' + board.boardType + ' job board queried successfully (' + board.liveCount + ' live postings); exact role not listed yet — keeping current status (' + (role.application_status || 'unset') + ')'
+      boardNote = 'Official ' + board.boardType + ' board queried fully (' + board.liveCount + ' live postings); exact role not listed yet — keeping current status (' + (role.application_status || 'unset') + ')'
     }
   } else {
-    // No queryable board (or ambiguous board results): fall back to explicit
-    // text signals. Only OPEN_NOW/CLOSED are asserted; else left unchanged.
+    // No queryable board (or an incomplete board): fall back to explicit text
+    // signals, which now require a contiguous role-title match.
     classification = classifyDeterministic(signals)
   }
 
-  const intakeYear = (signals.has2027 || /\b2027\b/.test(board?.job?.title || '')) ? '2027' : ''
+  const intakeYear = (signals.has2027 || /\b2027\b/.test(board?.job?.title || '') || postingSignals?.has2027) ? '2027' : ''
   const isOpenNow = classification.mappedApplicationStatus === 'Open Now'
 
   const result = {
@@ -732,13 +791,15 @@ async function verifyWithPageAi(role, config) {
     const result = normalizeGroqResult(raw, pages, label)
     result.evidence = (result.evidence + '\n' + formatPriorVerification('Prior evidence supplied to ' + label, deterministicResult)).slice(0, 4000)
 
-    // Objective board evidence overrides model reasoning: the exact role is
-    // live on the official board, so it is accepting applications.
+    // Objective board evidence overrides model reasoning only when the intake
+    // year and student status are objectively confirmed — never by trusting the
+    // previously stored status.
     if (board.ok && board.found) {
       const pageHas2027 = pages.some(page => /\b2027\b/.test(page.text))
-      const intakeOk = pageHas2027 || /\b2027\b/.test(board.job.title || '') ||
-        ['Open Now', 'Opening Soon', 'Expected'].includes(role.application_status)
-      if (intakeOk) {
+      const intakeOk = pageHas2027 || /\b2027\b/.test(board.job.title || '')
+      const studentOk = STUDENT_TERM_RE.test(board.job.title || '') || STUDENT_TERM_RE.test(role.specific_role || '')
+      const graduateSignal = /graduate|experienced hire|experienced|professional hire|post-?doc|apprenticeship/i.test(board.job.title || '')
+      if (intakeOk && studentOk && !graduateSignal) {
         result.status = 'OPEN_NOW'
         result.confidence = Math.max(result.confidence, 0.92)
         result.intake_year = '2027'
@@ -1076,19 +1137,28 @@ async function verifyWithAi(role) {
 }
 
 // Public entry point. Returns { ok, mode, result? , error? }.
-// Groq and OpenAI are intentionally not part of this audit path. Every row
-// gathers deterministic evidence first and calls Azure only when that evidence
-// cannot be safely mapped to a tracker status.
+// Every row gathers deterministic evidence first. Azure is escalated to ONLY
+// when (a) deterministic could not confidently resolve the role AND (b) it
+// actually gathered evidence to reason over. When nothing was fetchable there
+// is nothing for Azure to analyse, so the safe deterministic result is kept
+// without spending a call.
+function hasDeterministicEvidence(result) {
+  return Boolean(result && Array.isArray(result.sources) && result.sources.length)
+}
+
 export async function verifyPlacement(role) {
   const deterministic = await verifyDeterministic(role)
   if (deterministic.ok && deterministic.result?.mappedApplicationStatus) {
     return deterministic
   }
 
-  if (useAzure) {
+  const evidence = deterministic.ok && hasDeterministicEvidence(deterministic.result)
+
+  if (useAzure && evidence) {
     if (!azureApiKey || !azureEndpoint || !azureDeployment) {
       console.warn('USE_AZURE=true but Azure credentials are missing — retaining the deterministic result.')
     } else {
+      console.log('Azure escalation (deterministic UNKNOWN with evidence): ' + (role.company || '') + ' — ' + (role.specific_role || 'role'))
       const azure = await verifyWithAzure(role, deterministic, null)
       if (azure.ok) return azure
       console.warn('Azure verification failed: ' + azure.error + ' — retaining the deterministic result.')

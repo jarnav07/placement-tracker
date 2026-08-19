@@ -143,7 +143,7 @@ Database security should be enforced with Supabase Row Level Security (RLS) poli
 
 A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs **twice a day** (09:30 and 18:00 UK time) and can also be triggered manually from the Actions tab.
 
-Every audit row runs deterministic page/job-board verification first. Azure OpenAI is used only when that evidence is ambiguous or unavailable; Groq and OpenAI are disabled in the maintenance workflow.
+Every audit row runs deterministic page/job-board verification first. Azure OpenAI is escalated to **only** when the deterministic layer cannot reach a confident answer **and** it actually gathered page/board evidence to reason over — it is never called for every row, and never called when nothing was fetchable. Groq and OpenAI are disabled in the maintenance workflow.
 
 - **Deterministic first (no AI credits).** The audit fetches tracked links, follows "Apply" buttons to external job boards (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), and applies conservative evidence-gated rules.
 - **Azure OpenAI escalation.** The workflow sets `USE_AZURE=true` and provides the Azure deployment only for uncertain deterministic results. Use a deployment such as `gpt-4.1-mini` from Azure AI Foundry (via the Azure OpenAI v1 API, which no longer uses a dated `api-version`).
@@ -160,7 +160,10 @@ Each run:
 
 - Only placements that **start in 2027** are tracked. A closed **2026** intake is never treated as a closed **2027** intake.
 - A role is only added or flipped to **Open Now** when the exact student role and the 2027 intake are verified. In deterministic mode this means strong, explicit page signals (2027 + student terms + the exact role + an apply/open signal).
-- **Job-board verification.** When a tracked page's "Apply" button points to an external job board (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), the audit follows it and queries the board's public API. If the **exact tracked role appears among the live postings** it is flipped to **Open Now** (and the direct posting URL replaces the generic link). If the board is queried successfully and the role is absent — even loosely — a card currently marked **Open Now** is moved to **Closed**; otherwise the status is left unchanged. Boards that cannot be queried reliably are ignored (no assertion).
+- **Job-board verification.** When a tracked page's "Apply" button points to an external job board (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), the audit follows it and queries the board's public API.
+  - A live board match alone is **not** enough: the audit then reads the posting's own page and only flips to **Open Now** when the **2027 intake** and **student status** are both confirmed (a 2026 posting, a graduate scheme, or an unconfirmed intake stays unchanged). The direct posting URL replaces the generic link only in that confirmed case.
+  - A card is moved to **Closed** only when the board was **fully enumerated**, the role was previously **Open Now**, and the role is absent with no even-loose title match. Absence on an incomplete board (e.g. Workday's truncated listing) never closes a role.
+  - Boards that cannot be queried reliably are ignored (no assertion).
 - Unverifiable roles are left unchanged or marked **Not Yet Published** / **Expected** rather than guessed (AI mode).
 - The audit **never deletes rows** and **never touches** your application-tracking fields (`app_status`, dates, CV version, referral, interview, outcome, notes, Not Interested).
 
