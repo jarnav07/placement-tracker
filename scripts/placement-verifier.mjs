@@ -22,7 +22,6 @@ const useGroq = process.env.USE_GROQ === 'true'
 const azureApiKey = process.env.AZURE_OPENAI_API_KEY?.trim().replace(/^['"]|['"]$/g, '') || ''
 const azureEndpoint = (process.env.AZURE_OPENAI_ENDPOINT || '').trim().replace(/^['"]|['"]$/g, '').replace(/\/+$/, '')
 const azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT_NAME?.trim().replace(/^['"]|['"]$/g, '') || ''
-const azureApiVersion = process.env.AZURE_OPENAI_API_VERSION?.trim().replace(/^['"]|['"]$/g, '') || '2025-08-01-preview'
 const useAzure = process.env.USE_AZURE === 'true'
 
 const TODAY = new Date().toISOString().slice(0, 10)
@@ -699,6 +698,16 @@ async function verifyWithPageAi(role, config) {
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const payload = {
+    model,
+    temperature: 0,
+    max_tokens: 700,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: pageAiInstructions },
+      { role: 'user', content: userPrompt }
+    ]
+  }
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -707,16 +716,7 @@ async function verifyWithPageAi(role, config) {
         'Content-Type': 'application/json',
         ...headers
       },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        max_tokens: 700,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: pageAiInstructions },
-          { role: 'user', content: userPrompt }
-        ]
-      })
+      body: JSON.stringify(payload)
     })
 
     const body = await response.json()
@@ -782,8 +782,10 @@ function verifyWithAzure(role, deterministicResult, previousAiResult) {
   if (!azureApiKey || !azureEndpoint || !azureDeployment) {
     return { ok: false, mode: 'azure', error: 'USE_AZURE=true but AZURE_OPENAI_API_KEY / AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_DEPLOYMENT_NAME are missing' }
   }
-  const url = azureEndpoint + '/openai/deployments/' + encodeURIComponent(azureDeployment) +
-    '/chat/completions?api-version=' + encodeURIComponent(azureApiVersion)
+  // Azure OpenAI v1 API: the dated api-version query parameter has been removed
+  // in v1, so the endpoint below needs no version. gpt-4.1-mini is a standard
+  // (non-reasoning) model, so it accepts temperature and max_tokens.
+  const url = azureEndpoint + '/openai/v1/chat/completions'
   return verifyWithPageAi(role, {
     label: 'azure',
     apiKey: azureApiKey,

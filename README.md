@@ -146,7 +146,7 @@ A GitHub Actions workflow (`.github/workflows/placement-maintenance.yml`) runs *
 Every audit row runs deterministic page/job-board verification first. Azure OpenAI is used only when that evidence is ambiguous or unavailable; Groq and OpenAI are disabled in the maintenance workflow.
 
 - **Deterministic first (no AI credits).** The audit fetches tracked links, follows "Apply" buttons to external job boards (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), and applies conservative evidence-gated rules.
-- **Azure OpenAI escalation.** The workflow sets `USE_AZURE=true` and provides the Azure deployment only for uncertain deterministic results. Use a deployment such as `gpt-4.1-mini` from Azure AI Foundry.
+- **Azure OpenAI escalation.** The workflow sets `USE_AZURE=true` and provides the Azure deployment only for uncertain deterministic results. Use a deployment such as `gpt-4.1-mini` from Azure AI Foundry (via the Azure OpenAI v1 API, which no longer uses a dated `api-version`).
 - **Deterministic discovery.** The discovery step crawls official career/source pages already present in the tracker, extracts explicit student-role links, and verifies each candidate with deterministic evidence first and Azure only when needed. It does not use web-search AI or Groq.
 - **Final fallback.** If Azure is unavailable or fails, the best safe deterministic result is retained; rows are never deleted or guessed.
 - **Optional providers.** The scripts still support Groq/OpenAI for manual experiments, but the scheduled maintenance workflow explicitly disables them.
@@ -171,9 +171,8 @@ Each run:
 | `SUPABASE_URL` (or `VITE_SUPABASE_URL`) | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Privileged Supabase access for the automation |
 | `AZURE_OPENAI_API_KEY` (required for scheduled AI escalation) | Azure OpenAI API key — enables Azure escalation for uncertain deterministic results |
-| `AZURE_OPENAI_ENDPOINT` (optional) | Azure OpenAI endpoint, e.g. `https://your-resource.openai.azure.com` |
-| `AZURE_OPENAI_DEPLOYMENT_NAME` (optional) | Your Azure deployment name, e.g. `gpt-4.1-mini` |
-| `AZURE_OPENAI_API_VERSION` (optional) | API version, defaults to `2025-08-01-preview` |
+| `AZURE_OPENAI_ENDPOINT` (required for Azure escalation) | Azure OpenAI endpoint, e.g. `https://your-resource.openai.azure.com` |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` (required for Azure escalation) | Your Azure deployment name, e.g. `gpt-4.1-mini` |
 | `USE_AZURE` (repository variable, optional) | Defaults to `true` in the workflow; set to `false` to disable the Azure AI audit |
 | `GROQ_API_KEY` (not used by scheduled workflow) | Only needed for optional manual Groq experiments |
 | `USE_GROQ` (not used by scheduled workflow) | The maintenance workflow sets this to `false` directly |
